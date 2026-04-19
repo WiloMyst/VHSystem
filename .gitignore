@@ -1,0 +1,37 @@
+# Server
+
+VHServer/build/
+VHServer/**/bin/
+VHServer/**/lib/
+
+VHServer/.venv/
+VHServer/**/__pycache__/
+*.pyc
+
+VHServer/.vscode/
+VHServer/.idea/
+
+*.pb.cc
+*.pb.h
+*_pb2_grpc.py
+*_pb2.py
+
+*.onnx.json
+*.onnx.data
+*.pt
+*.bin
+*.wav
+
+VHServer/third_party/*
+
+
+# Client
+
+VHClient/.vs/
+VHClient/Binaries/
+VHClient/Content/*
+VHClient/DerivedDataCache/
+VHClient/Intermediate/
+VHClient/Plugins/*
+VHClient/Saved/
+*.sln
