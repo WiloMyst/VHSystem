@@ -1,0 +1,12 @@
+server:
+  host: "0.0.0.0"
+  port: 50051
+  worker_threads: 4    # 业务线程池数量
+
+ai_brain:
+  tts_model_path: "../models/zh_CN-huayan-medium.onnx"
+  v2f_model_path: "../models/dummy_v2f.onnx"
+  intra_op_threads: 1  # ONNX算子内部线程数
+
+logging:
+  level: "info"        # 可选: debug, info, warn, error

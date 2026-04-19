@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package Avatar;
+option go_package = "./Avatar";
+
+message AvatarStreamRequest {
+  string session_id = 1;
+  string stream_type = 2;
+  bytes payload = 3;
+  repeated int64 phoneme_ids = 4;
+  bool is_end_of_stream = 5;
+  string text_payload = 6;
+}
+
+message BlendShapeFrame {
+  repeated float weights = 1;
+}
+
+message AvatarStreamResponse {
+  bool success = 1;
+  repeated BlendShapeFrame frames = 2;
+  bytes audio_pcm = 3;
+  string error_msg = 4;
+  bool is_end_of_stream = 5;
+}
+
+service AvatarService {
+  rpc ChatWithAvatar(stream AvatarStreamRequest) returns (stream AvatarStreamResponse) {}
+}
