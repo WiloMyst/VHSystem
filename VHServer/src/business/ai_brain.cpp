@@ -63,7 +63,8 @@ std::vector<int64_t> AIBrain::TextToPhonemes(const std::string& text) {
 }
 
 void AIBrain::InferStream(const std::string& raw_text, 
-                          std::function<void(const ChunkResult&)> on_chunk_ready) {
+                     std::function<void(const ChunkResult&)> on_chunk_ready,
+                     std::function<bool()> is_cancelled) {
     
     // 1. 调用刚才手搓的硬核切分器
     std::vector<std::string> sentences = TextSplitter::Split(raw_text);
@@ -80,6 +81,12 @@ void AIBrain::InferStream(const std::string& raw_text,
 
     // 2. 逐句并发执行 (Pipelining)
     for (size_t i = 0; i < sentences.size(); ++i) {
+        // 刹车点 1：每次算新句子前检查
+        if (is_cancelled && is_cancelled()) {
+            spdlog::warn("客户端已断开，终止后续文本的 NLP 和 TTS 推理！");
+            return; 
+        }
+
         const std::string& sentence = sentences[i];
         spdlog::info("   -> 正在推理切片 [{}]: {}", i, sentence);
 
@@ -95,13 +102,23 @@ void AIBrain::InferStream(const std::string& raw_text,
         if (phoneme_ids.empty()) continue;
 
         // 1. 拿到当前短句的完整 PCM
-        auto sentence_pcm = tts_model_->Forward(phoneme_ids);
+        std::vector<int16_t> sentence_pcm;
+        {
+            // 只有拿到钥匙的线程才能调用 GPU，离开这个大括号自动解锁
+            std::lock_guard<std::mutex> lock(gpu_mutex_);
+            sentence_pcm = tts_model_->Forward(phoneme_ids);
+        }
         if (sentence_pcm.empty()) continue;
 
         size_t total_samples = sentence_pcm.size();
 
         // 2. 二级流式分发：把整段音频像切香肠一样，一段段喂给 V2F 和 UE5！
         for (size_t offset = 0; offset < total_samples; offset += SUB_CHUNK_SIZE) {
+            // 刹车点 2：在送入 V2F 模型（最耗时）前检查！
+            if (is_cancelled && is_cancelled()) {
+                spdlog::warn("客户端已断开，停止音频切片与 V2F 推理，释放 GPU 资源！");
+                return; 
+            }
             
             size_t current_chunk_size = std::min(SUB_CHUNK_SIZE, total_samples - offset);
             
@@ -110,7 +127,11 @@ void AIBrain::InferStream(const std::string& raw_text,
                                            sentence_pcm.begin() + offset + current_chunk_size);
 
             // 送入 V2F。此时 pcm_slice 绝对小于 16384，完美命中内存池！
-            auto frames_slice = v2f_model_->Forward(pcm_slice);
+            std::vector<std::vector<float>> frames_slice;
+            {
+                std::lock_guard<std::mutex> lock(gpu_mutex_);
+                frames_slice = v2f_model_->Forward(pcm_slice);
+            }
 
             // 打包当前切片
             ChunkResult chunk_result;

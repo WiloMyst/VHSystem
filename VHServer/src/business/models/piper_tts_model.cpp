@@ -8,7 +8,7 @@ namespace business {
 namespace models {
 
 PiperTTSModel::PiperTTSModel(const std::string& model_path) 
-    : OnnxModelBase(model_path, 1) { // 继承基类，1 个内部线程
+    : OnnxModelBase(model_path, 1, false) { // 继承基类，1 个内部线程
     std::cout << " [TTS Model] Piper 语音合成引擎加载完毕." << std::endl;
 }
 

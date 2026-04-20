@@ -31,6 +31,7 @@ void AvatarSession::HandleEvent(EventType type, bool ok) {
     if (!ok) {
         spdlog::info("客户端发送完毕(EOF)，服务端发起 Finish 挥手告别...");
         // 核心救命代码：主动调用 Finish()，告诉 Python 客户端“我也发完了，你可以结束循环了”
+        is_active_.store(false);
         auto* tag = new EventTag{shared_from_this(), EventType::FINISH};
         stream_.Finish(grpc::Status::OK, tag);
         return;
@@ -95,40 +96,60 @@ void AvatarSession::EnqueueWrite(const Avatar::AvatarStreamResponse& response) {
 
 // 处理请求的核心逻辑：调用 AI 大脑进行推理，并将结果通过 gRPC 发送回客户端
 void AvatarSession::ProcessRequestAsync(Avatar::AvatarStreamRequest req) {
-    auto future_opt = pool_->enqueue([this, self = shared_from_this(), req = std::move(req)]() {
-        try {
-            // 1. 提取 UE5 客户端传来的 UTF-8 纯文本
-            std::string raw_text = req.text_payload();
-            if (raw_text.empty()) {
-                throw std::invalid_argument("Empty text payload received from client.");
-            }
+    // 每次收到新请求，世代号 +1
+    uint64_t my_request_id = ++current_request_id_;
+    
+    // 1. 提取 UE5 客户端传来的 UTF-8 纯文本
+    std::string raw_text = req.text_payload();
+    spdlog::info("收到新请求 [ID: {}]: {}", my_request_id, raw_text);
+    if (raw_text.empty()) {
+        throw std::invalid_argument("Empty text payload received from client.");
+    }
 
+    auto future_opt = pool_->enqueue([this, self = shared_from_this(), req = std::move(req), my_request_id, raw_text]() {
+        try {
             spdlog::info("Processing text request: {}", raw_text);
 
             // 2. 流式双向推理管线：直接把 raw_text 喂给大脑
-            brain_->InferStream(raw_text, [this, self](const ChunkResult& chunk) {
-                Avatar::AvatarStreamResponse reply;
-                
-                // 序列化 PCM 音频切片
-                if (!chunk.audio_pcm_chunk.empty()) {
-                    std::string audio_bytes(reinterpret_cast<const char*>(chunk.audio_pcm_chunk.data()), 
-                                            chunk.audio_pcm_chunk.size() * sizeof(int16_t));
-                    reply.set_audio_pcm(audio_bytes);
-                }
-
-                // 序列化 ARKit 52维表情切片
-                for (const auto& frame_data : chunk.blendshape_frames_chunk) {
-                    auto* pb_frame = reply.add_frames(); 
-                    for (float weight : frame_data) {
-                        pb_frame->add_weights(weight);
+            brain_->InferStream(
+                raw_text, 
+                [this, self, my_request_id](const ChunkResult& chunk) {
+                    // 拦截：如果 Session 已死，直接丢弃数据，绝对不碰 gRPC
+                    if (!self->is_active_.load() || self->current_request_id_.load() != my_request_id) {
+                        spdlog::warn("拦截到幽灵写入！Session 已销毁，直接丢弃该切片。");
+                        return; 
                     }
-                }
 
-                // 打包流式状态并推入无锁发送队列
-                reply.set_success(true);
-                reply.set_is_end_of_stream(chunk.is_last_chunk);
-                self->EnqueueWrite(reply);
-            });
+                    Avatar::AvatarStreamResponse reply;
+                    
+                    // 序列化 PCM 音频切片
+                    if (!chunk.audio_pcm_chunk.empty()) {
+                        std::string audio_bytes(reinterpret_cast<const char*>(chunk.audio_pcm_chunk.data()), 
+                                                chunk.audio_pcm_chunk.size() * sizeof(int16_t));
+                        reply.set_audio_pcm(audio_bytes);
+                    }
+
+                    // 序列化 ARKit 52维表情切片
+                    for (const auto& frame_data : chunk.blendshape_frames_chunk) {
+                        auto* pb_frame = reply.add_frames(); 
+                        for (float weight : frame_data) {
+                            pb_frame->add_weights(weight);
+                        }
+                    }
+
+                    // 打包流式状态并推入无锁发送队列
+                    reply.set_success(true);
+                    reply.set_is_end_of_stream(chunk.is_last_chunk);
+                    // 拦截：再次确认存活后，推入发送队列
+                    if (self->is_active_.load()) {
+                        self->EnqueueWrite(reply);
+                    }
+                },
+                // 回调 2：死亡探针 (is_cancelled)，传给 AI 大脑用来急刹车
+                [this, self, my_request_id]() -> bool {
+                    return !self->is_active_.load() || self->current_request_id_.load() != my_request_id;
+                }
+            );
 
         } catch (const std::exception& e) {
             spdlog::error("Pipeline Error in ProcessRequestAsync: {}", e.what());

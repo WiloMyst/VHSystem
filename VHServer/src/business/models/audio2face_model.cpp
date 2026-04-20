@@ -1,6 +1,7 @@
 #include "engine/business/models/audio2face_model.h"
 #include <iostream>
 #include <algorithm>
+#include <mutex>
 #include <spdlog/spdlog.h>
 
 namespace engine {
@@ -8,12 +9,14 @@ namespace business {
 namespace models {
 
 Audio2FaceModel::Audio2FaceModel(const std::string& model_path) 
-    : OnnxModelBase(model_path, 1) {
+    : OnnxModelBase(model_path, 1, true) {
     // 初始化内存池。预留 4 块坑位供多线程并发调用
     tensor_pool_ = std::make_unique<infra::BufferPool<float>>(4, MAX_CHUNK_SAMPLES);
     
     spdlog::info(" [V2F Model] Audio2Face 算子加载成功，准备生成面部表情数据.");
 }
+
+static std::mutex g_inference_mutex;
 
 std::vector<std::vector<float>> Audio2FaceModel::Forward(const std::vector<int16_t>& pcm_audio) {
     // 1. 确定实际处理的大小，防止越界
@@ -37,13 +40,17 @@ std::vector<std::vector<float>> Audio2FaceModel::Forward(const std::vector<int16
     std::vector<int64_t> input_node_dims = {1, static_cast<int64_t>(actual_size)};
     Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
         *memory_info_, 
-        dst_ptr,           // 使用池化指针，彻底消灭 input_tensor_values！
+        dst_ptr,           // 使用池化指针，彻底消灭 input_tensor_values
         actual_size, 
         input_node_dims.data(), input_node_dims.size()
     );
 
     const char* input_names[] = {"audio_pcm"};
     const char* output_names[] = {"blendshapes"};
+
+    // 在 Run 之前加锁。确保同一时间只有一个线程在使用 GPU
+
+    std::lock_guard<std::mutex> lock(g_inference_mutex);
 
     // 5. 执行推理
     auto output_tensors = session_->Run(

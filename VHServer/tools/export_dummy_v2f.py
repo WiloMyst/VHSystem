@@ -74,7 +74,7 @@ torch.onnx.export(
     input_names=['audio_pcm'],
     output_names=['blendshapes'],
     dynamic_axes={
-        # ⚡️ 核心结构契约：输入是动态音频长度，输出是动态【帧数】序列！
+        # 核心结构：输入是动态音频长度，输出是动态【帧数】序列！
         'audio_pcm': {0: 'batch_size', 1: 'seq_len'}, 
         'blendshapes': {0: 'batch_size', 1: 'num_frames'} 
     }

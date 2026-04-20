@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(DualModeEngine CXX)
+project(VHServer CXX)
 
 # =====================================================================
 # 1. 全局配置 (Global Settings)
@@ -60,7 +60,7 @@ add_custom_command(
 # =====================================================================
 # 4. 构建目标 (Target Definition)
 # =====================================================================
-add_executable(engine_server 
+add_executable(vh_server 
     src/main.cpp 
     src/core/grpc_server.cpp 
     src/core/avatar_session.cpp 
@@ -74,8 +74,8 @@ add_executable(engine_server
 # =====================================================================
 # 5. 目标属性配置 (Modern CMake Target-Centric Config)
 # =====================================================================
-# 5.1 引入头文件目录 (PRIVATE 表示这些头文件仅供 engine_server 内部使用)
-target_include_directories(engine_server PRIVATE
+# 5.1 引入头文件目录 (PRIVATE 表示这些头文件仅供 vh_server 内部使用)
+target_include_directories(vh_server PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include" 
     "${GENERATED_DIR}" 
     ${GRPC_INCLUDE_DIRS} 
@@ -84,12 +84,12 @@ target_include_directories(engine_server PRIVATE
 )
 
 # 5.2 引入动态库搜索目录
-target_link_directories(engine_server PRIVATE 
+target_link_directories(vh_server PRIVATE 
     "${ONNXRUNTIME_DIR}/lib"
 )
 
 # 5.3 统一链接所有底层系统库与业务库
-target_link_libraries(engine_server PRIVATE
+target_link_libraries(vh_server PRIVATE
     ${GRPC_LIBRARIES}
     ${PROTOBUF_LIBRARIES}
     spdlog::spdlog

@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <mutex>
 #include <functional>
 #include "engine/business/models/piper_tts_model.h"
 #include "engine/business/models/audio2face_model.h"
@@ -24,11 +25,15 @@ public:
     std::vector<int64_t> TextToPhonemes(const std::string& text);
 
     void InferStream(const std::string& raw_text, 
-                     std::function<void(const ChunkResult&)> on_chunk_ready);
+                     std::function<void(const ChunkResult&)> on_chunk_ready,
+                     std::function<bool()> is_cancelled = nullptr);
 
 private:
     std::unique_ptr<models::PiperTTSModel> tts_model_;
     std::unique_ptr<models::Audio2FaceModel> v2f_model_;
+
+    // 防止多线程并发击穿 CUDA 上下文
+    std::mutex gpu_mutex_;
 };
 
 } // namespace business
