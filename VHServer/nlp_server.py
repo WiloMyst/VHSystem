@@ -25,32 +25,42 @@ def text_to_ids(text, config):
     return phoneme_ids
 
 def run_server():
-    # 确保此处的 json 路径与你实际存放的路径一致
     config = load_config("models/zh_CN-huayan-medium.onnx.json")
     
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # 允许端口复用
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(('127.0.0.1', 50052))
-    server.listen(50) # 支持高并发 backlog
+    server.listen(50) 
     
     print("[NLP Server] 纯文本解析微服务已启动，监听 127.0.0.1:50052...")
 
     while True:
         conn, addr = server.accept()
+        print(f"[NLP Server] [+] 建立持久长连接: {addr}")
+        
         try:
-            data = conn.recv(4096).decode('utf-8')
-            if not data:
-                continue
-            
-            ids = text_to_ids(data, config)
-            response = json.dumps(ids)
-            
-            conn.sendall(response.encode('utf-8'))
+            # 神级操作：将原生 socket 包装成文件流 (makefile)，完美解决 TCP 粘包问题！
+            with conn, conn.makefile('rw', encoding='utf-8') as f:
+                while True: # 开启长连接心跳循环
+                    data = f.readline() # 按行读取，只要没读到换行符就阻塞等待
+                    if not data:
+                        print(f"[NLP Server] [-] 客户端已主动断开连接: {addr}")
+                        break 
+                    
+                    text = data.strip()
+                    if not text:
+                        continue
+                    
+                    # 执行 NLP 推理
+                    ids = text_to_ids(text, config)
+                    response = json.dumps(ids)
+                    
+                    # 结果加上换行符，推回给 C++ 端
+                    f.write(response + '\n')
+                    f.flush() # 强制立刻刷入网卡缓冲
+                    
         except Exception as e:
-            print(f"[NLP Server] Error: {e}")
-        finally:
-            conn.close()
+            print(f"[NLP Server] [!] 连接异常断开: {e}")
 
 if __name__ == '__main__':
     run_server()

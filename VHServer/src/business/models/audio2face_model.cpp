@@ -16,8 +16,6 @@ Audio2FaceModel::Audio2FaceModel(const std::string& model_path)
     spdlog::info(" [V2F Model] Audio2Face 算子加载成功，准备生成面部表情数据.");
 }
 
-static std::mutex g_inference_mutex;
-
 std::vector<std::vector<float>> Audio2FaceModel::Forward(const std::vector<int16_t>& pcm_audio) {
     // 1. 确定实际处理的大小，防止越界
     size_t actual_size = std::min(pcm_audio.size(), MAX_CHUNK_SAMPLES);
@@ -47,10 +45,6 @@ std::vector<std::vector<float>> Audio2FaceModel::Forward(const std::vector<int16
 
     const char* input_names[] = {"audio_pcm"};
     const char* output_names[] = {"blendshapes"};
-
-    // 在 Run 之前加锁。确保同一时间只有一个线程在使用 GPU
-
-    std::lock_guard<std::mutex> lock(g_inference_mutex);
 
     // 5. 执行推理
     auto output_tensors = session_->Run(

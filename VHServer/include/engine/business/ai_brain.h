@@ -2,10 +2,15 @@
 #include <vector>
 #include <string>
 #include <memory>
-#include <mutex>
 #include <functional>
 #include "engine/business/models/piper_tts_model.h"
 #include "engine/business/models/audio2face_model.h"
+
+namespace engine {
+namespace infra {
+    class ThreadPool; 
+}
+}
 
 namespace engine {
 namespace business {
@@ -32,8 +37,16 @@ private:
     std::unique_ptr<models::PiperTTSModel> tts_model_;
     std::unique_ptr<models::Audio2FaceModel> v2f_model_;
 
-    // 防止多线程并发击穿 CUDA 上下文
-    std::mutex gpu_mutex_;
+    // 全异步流水线架构：用单线程池代替 Mutex 锁，实现串行保护与并发吞吐
+    std::unique_ptr<infra::ThreadPool> tts_pipeline_;
+    std::unique_ptr<infra::ThreadPool> v2f_pipeline_;
+
+    // NLP 微服务长连接基建
+    int nlp_socket_ = -1;
+    std::mutex nlp_mutex_; 
+    
+    void InitNlpConnection();
+    void CloseNlpConnection();
 };
 
 } // namespace business
