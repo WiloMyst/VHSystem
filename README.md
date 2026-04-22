@@ -1,5 +1,9 @@
 # AI Avatar Streaming Engine (AI数字人流式交互双端引擎)
 
+[![license](https://img.shields.io/badge/license-MIT-blue)](https://github.com/WiloMyst/OpenWorldARPG/blob/master/LICENSE) [![GitHub repo size](https://img.shields.io/github/repo-size/WiloMyst/VHSystem)](https://github.com/WiloMyst/VHSystem)
+
+
+
 ## 概述
 
 基于 **现代 C++ 微服务** 与 **UE5** 混合开发的实时 AI 数字人端云交互系统。包含完整的高并发后端推理调度引擎与低延迟前端渲染组件。致力于解决大模型驱动下数字人语音与口型动画的延迟、卡顿及多线程并发灾难等工业级痛点。
