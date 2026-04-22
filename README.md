@@ -57,4 +57,3 @@
 **Models:**
 
 - [rhasspy / piper](https://www.google.com/search?q=https://github.com/rhasspy/piper) - 轻量级且极速的 VITS TTS 引擎
-- *Dummy V2F Model* - 自研的音频转 ARKit 52 维表情占位推理网络
