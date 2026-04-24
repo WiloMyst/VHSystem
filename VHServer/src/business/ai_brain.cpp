@@ -102,68 +102,94 @@ void AIBrain::InferStream(const std::string& raw_text,
                      std::function<void(const ChunkResult&)> on_chunk_ready,
                      std::function<bool()> is_cancelled) {
     
-    std::vector<std::string> sentences = TextSplitter::Split(raw_text);
-    if (sentences.empty()) return;
+    // 锁定 NLP 通道，准备发包
+    std::lock_guard<std::mutex> lock(nlp_mutex_);
+    if (nlp_socket_ == -1) InitNlpConnection();
+    if (nlp_socket_ == -1) {
+        spdlog::error("NLP 长连接丢失，推理终止。");
+        return;
+    }
 
-    // 二级切片大小。必须小于内存池的 16384！
-    // 为了和 30FPS 完美对齐(735的整数倍)，我们定为 8820 (约 0.4 秒，刚好 12 帧)
-    // 这样不会产生任何多余的尾数截断！
+    // 1. 直接把玩家提问 (Prompt) 原封不动发给 Python 大模型
+    std::string payload = raw_text + "\n";
+    if (send(nlp_socket_, payload.c_str(), payload.length(), MSG_NOSIGNAL) < 0) {
+        CloseNlpConnection();
+        return;
+    }
+
+    spdlog::info("提问已发送至大模型，等待流式回传...");
+
     const size_t SUB_CHUNK_SIZE = 8820;
-    spdlog::info("流水线启动：已切分为 {} 个短句，开始异步分发.", sentences.size());
+    char buffer[8192] = {0};
+    std::string recv_buffer = "";
 
-    // 阶段 1：NLP 依然在当前线程同步执行，保证句子的绝对先后顺序
-    for (size_t i = 0; i < sentences.size(); ++i) {
-        if (is_cancelled && is_cancelled()) return;
+    // 2. 开启堵塞循环，疯狂接收 Python 源源不断发来的音素切片
+    while (true) {
+        if (is_cancelled && is_cancelled()) break;
 
-        const std::string& sentence = sentences[i];
-        bool is_text_end = (i == sentences.size() - 1);
-
-        std::vector<int64_t> phoneme_ids;
-        try {
-            phoneme_ids = TextToPhonemes(sentence);
-        } catch (const std::exception& e) {
-            spdlog::warn(" NLP 服务解析切片失败，跳过该句: {}", e.what());
-            continue;
+        int valread = read(nlp_socket_, buffer, sizeof(buffer) - 1);
+        if (valread <= 0) {
+            CloseNlpConnection();
+            break;
         }
+        buffer[valread] = '\0';
+        recv_buffer += buffer;
 
-        if (phoneme_ids.empty()) continue;
+        // 处理 TCP 粘包：按 \n 分割
+        size_t pos;
+        while ((pos = recv_buffer.find('\n')) != std::string::npos) {
+            std::string line = recv_buffer.substr(0, pos);
+            recv_buffer.erase(0, pos + 1);
 
-        // 阶段 2：推入 TTS 流水线 (当前线程立刻解放，去接下一个用户的请求)
-        tts_pipeline_->enqueue([this, phoneme_ids, SUB_CHUNK_SIZE, is_text_end, on_chunk_ready, is_cancelled]() {
-            if (is_cancelled && is_cancelled()) return;
+            if (line.empty()) continue;
 
-            // 彻底无锁！因为 tts_pipeline_ 只有一个工人在干活
-            std::vector<int16_t> sentence_pcm = tts_model_->Forward(phoneme_ids);
-            if (sentence_pcm.empty()) return;
+            // 解析音素数组
+            json json_response = json::parse(line);
+            std::vector<int64_t> phoneme_ids = json_response.get<std::vector<int64_t>>();
 
-            size_t total_samples = sentence_pcm.size();
-
-            // 阶段 3：切片，并推入 V2F 流水线 
-            for (size_t offset = 0; offset < total_samples; offset += SUB_CHUNK_SIZE) {
-                if (is_cancelled && is_cancelled()) return;
-                
-                size_t current_chunk_size = std::min(SUB_CHUNK_SIZE, total_samples - offset);
-                std::vector<int16_t> pcm_slice(sentence_pcm.begin() + offset, 
-                                               sentence_pcm.begin() + offset + current_chunk_size);
-                
-                bool is_last_chunk = is_text_end && (offset + current_chunk_size >= total_samples);
-
-                v2f_pipeline_->enqueue([this, pcm_slice, is_last_chunk, on_chunk_ready, is_cancelled]() {
-                    if (is_cancelled && is_cancelled()) return;
-
-                    // 彻底无锁！因为 v2f_pipeline_ 只有一个工人在调 GPU！
-                    std::vector<std::vector<float>> frames_slice = v2f_model_->Forward(pcm_slice);
-
-                    ChunkResult chunk_result;
-                    chunk_result.audio_pcm_chunk = std::move(pcm_slice); // 这里可以用 move 优化性能
-                    chunk_result.blendshape_frames_chunk = std::move(frames_slice);
-                    chunk_result.is_last_chunk = is_last_chunk;
-
-                    // 阶段 4：最后一步，推给 gRPC 底层网络发送
-                    on_chunk_ready(chunk_result);
+            // 3. 终结判定：如果收到空数组 "[]"，说明大模型回答完毕
+            if (phoneme_ids.empty()) {
+                spdlog::info("大模型生成完毕，当前流结束。");
+                // 派发一个空任务，仅用于触发 gRPC 的 IsEndOfStream 标志
+                tts_pipeline_->enqueue([on_chunk_ready]() {
+                    ChunkResult end_chunk;
+                    end_chunk.is_last_chunk = true;
+                    on_chunk_ready(end_chunk);
                 });
+                return; // 彻底退出当前提问的循环
             }
-        });
+
+            // 4. 将收到的音素切片，推入后续的 TTS -> V2F 异步流水线
+            tts_pipeline_->enqueue([this, phoneme_ids, SUB_CHUNK_SIZE, on_chunk_ready, is_cancelled]() {
+                if (is_cancelled && is_cancelled()) return;
+
+                std::vector<int16_t> sentence_pcm = tts_model_->Forward(phoneme_ids);
+                if (sentence_pcm.empty()) return;
+
+                size_t total_samples = sentence_pcm.size();
+
+                for (size_t offset = 0; offset < total_samples; offset += SUB_CHUNK_SIZE) {
+                    if (is_cancelled && is_cancelled()) return;
+                    
+                    size_t current_chunk_size = std::min(SUB_CHUNK_SIZE, total_samples - offset);
+                    std::vector<int16_t> pcm_slice(sentence_pcm.begin() + offset, 
+                                                   sentence_pcm.begin() + offset + current_chunk_size);
+                    
+                    v2f_pipeline_->enqueue([this, pcm_slice, on_chunk_ready, is_cancelled]() {
+                        if (is_cancelled && is_cancelled()) return;
+
+                        std::vector<std::vector<float>> frames_slice = v2f_model_->Forward(pcm_slice);
+
+                        ChunkResult chunk_result;
+                        chunk_result.audio_pcm_chunk = std::move(pcm_slice);
+                        chunk_result.blendshape_frames_chunk = std::move(frames_slice);
+                        chunk_result.is_last_chunk = false; // 只有空数组触发才是真正的结尾
+
+                        on_chunk_ready(chunk_result);
+                    });
+                }
+            });
+        }
     }
 }
 

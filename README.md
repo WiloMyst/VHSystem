@@ -57,3 +57,6 @@
 **Models:**
 
 - [rhasspy / piper](https://www.google.com/search?q=https://github.com/rhasspy/piper) - 轻量级且极速的 VITS TTS 引擎
+- Qwen2.5-1.5B - 通义千问15亿参数版
+- Ollama - LLM本地部署工具
+
