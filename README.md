@@ -1,4 +1,4 @@
-# AI Avatar Streaming Engine (AI数字人流式交互双端引擎)
+# 基于大模型与 TTS 推理的虚拟人流式交互引擎
 
 [![license](https://img.shields.io/badge/license-MIT-blue)](https://github.com/WiloMyst/VHSystem/blob/master/LICENSE) [![GitHub repo size](https://img.shields.io/github/repo-size/WiloMyst/VHSystem)](https://github.com/WiloMyst/VHSystem)
 
@@ -6,7 +6,9 @@
 
 ## 概述
 
-基于 **现代 C++ 微服务** 与 **UE5** 混合开发的实时 AI 数字人端云交互系统。包含完整的高并发后端推理调度引擎与低延迟前端渲染组件。致力于解决大模型驱动下数字人语音与口型动画的延迟、卡顿及多线程并发灾难等工业级痛点。
+本项目为面向实时交互场景的**端云协同虚拟人流式驱动引擎**。系统采用 C++ 微服务后端与 Unreal Engine 5 (UE5) 客户端解耦架构，构建了涵盖大模型 (LLM) 流式生成、TTS 语音合成与端侧 3D 面部骨骼驱动的全链路流水线。
+
+项目旨在通过 **gRPC 全双工通信、无锁内存池 (Zero-Copy) 与端侧抗抖动 (Jitter Buffer) 机制**，攻克传统大模型驱动方案中的网络 I/O 阻塞、内存碎片化，以及网络抖动引发的音画时序偏移问题，提供高吞吐、极低延迟的交互闭环方案。
 
 
 
@@ -20,22 +22,27 @@
 
 ### 服务端 (C++ Backend)
 
-- **基于 gRPC 的高并发双向流底座 (Bidirectional Streaming):**
-  - **异步微服务调度：** 摒弃传统的请求-阻塞模型，采用 gRPC 异步双向流。前端发送文本后，后端持续、分块地将生成的 PCM 音频与 BlendShape 数据推送至客户端，将首音频响应时间 (TTFA) 压榨至极致。
-  - **背压保护的线程池 (Backpressure ThreadPool)：** 核心层完全剥离网络 I/O 与 AI 推理。自研带熔断机制的 C++ 线程池，当高并发请求打满 `max_queue_size` 时触发优雅降级，防止系统 OOM 崩溃。
-- **异构推理与零拷贝内存管理 (Zero-Copy Memory Management):**
-  - **RAII 内存池架构：** 针对高频的视音频 Tensor 构建，彻底摒弃运行时的 Heap Allocation。基于自定义智能指针删除器 (Custom Deleter) 编写了高性能 `BufferPool`，实现内存块的无锁借还。
-  - **端到端流式推理：** 集成 ONNX Runtime (C++ API)，支持 CPU/GPU 异构加速。将 TTS (Piper) 音频波形作为原生指针直接挂载到 Audio2Face (V2F) 的输入 Tensor 上，实现算子间的数据绝对零拷贝。
+- **基于 gRPC 的异步双向流通信底座 (Bidirectional Streaming):**
+
+  - **全双工流式调度：** 采用 gRPC 异步双向流替代传统的 Request-Response 阻塞模型。实现文本输入的流式接收与 PCM 音频 / BlendShape 表情权重的分块实时下发，最大化降低首段音频响应时间 (TTFA)。
+
+  - **背压熔断与并发控制：** 实现网络 I/O 与 AI 推理任务的物理线程解耦。构建具备背压 (Backpressure) 机制的自定义 C++ 线程池，基于任务队列阈值 (`max_queue_size`) 动态触发请求熔断与优雅降级，保障系统在高并发穿透下的资源可用性，规避 OOM 风险。
+
+- **异构推理管线与零拷贝内存架构 (Zero-Copy Memory Management):**
+
+  - **RAII 高性能无锁内存池：** 针对高频视音频 Tensor 数据流，构建基于 RAII 范式的自定义内存池 (`BufferPool`)。结合定制化智能指针删除器 (Custom Deleter) 管理内存块生命周期，消除推理关键路径上的动态堆分配 (Heap Allocation) 开销。
+
+  - **端到端数据流转优化：** 级联 `llama.cpp` 与 ONNX Runtime C++ API。通过多级生产者-消费者并发模型，在主机侧将 Piper TTS 输出的音频波形以原生指针直接映射 V2F 为输入 Tensor，消除中间格式转换与二次拷贝开销，保障异构推理流水线的高效衔接。
 
 ### 客户端 (UE5 Frontend)
 
-- **抗抖动缓冲与音画强同步 (Jitter Buffer & Sync):**
-  - **数据消费解耦：** 使用 UE 底层无锁队列 `TQueue` 接收网络层发来的碎片化音频流与表情序列，实现网络线程与 GameThread 渲染主线程的安全隔离。
-  - **绝对时钟驱动的线性插值：** 突破网络抖动与生成帧率限制。以音频程序化波形 (`USoundWaveProcedural`) 真实的连续播放时间为绝对主时钟，对后端传入的 30FPS ARKit 52维表情权重进行动态 `Lerp` 插值，完美抹平断层，在 UE5 端展现 60FPS 的丝滑唇形。
-  - **网络饥饿平滑降级：** 遇到极端网络卡顿产生数据断供 (Starvation) 时，底层触发 `FInterpTo` 阻尼算法，使面部肌肉平滑回落至静止状态，拒绝出现模型僵死或撕裂。
-- **模块化的网络与组件设计:**
-  - **插件化接入：** 利用 TurboLink 插件自动生成 UE 的 gRPC 通信层，将底层的网络生命周期 (Session) 与 C++ 表现层组件 `UAvatarStreamingComponent` 深度分离。
-  - **事件驱动设计：** 暴露出极为干净的 Blueprint 接口 (`SendChatText`, `InterruptAndFlush`)，策划或动画师完全无需修改底层 C++ 代码，即可将该数字人组件挂载到任意 Skeletal Mesh 上。
+- **时序同步与抗抖动渲染管线 (Temporal Sync & Anti-Jitter Pipeline):**
+  - **跨线程安全数据分发：** 依托 UE 核心无锁容器 `TQueue` 构建数据消费队列，接收网络层下发的碎片化音频流与表情序列，实现网络 I/O 线程与 `GameThread` 渲染主线程的物理隔离，规避竞态条件。
+  - **基于音频主时钟的帧率上采样 (Framerate Upsampling)：** 以 `USoundWaveProcedural` 缓冲区的真实音频消耗时长作为绝对参考时钟 (Master Clock)。针对云端下发的离散 30FPS 表情权重，通过 `Lerp` 机制进行动态线性插值，消除网络抖动 (Jitter) 带来的时序误差，在端侧稳定输出 60FPS 的连续面部动画。
+  - **数据饥饿与状态回落机制 (Starvation Fallback)：** 针对网络拥塞导致的数据断供 (Data Starvation) 场景，引入基于 `FInterpTo` 的阻尼干预策略。在缓冲区耗尽时，驱动面部权重以受控速率平滑回退至中性状态 (Neutral Pose)，防止渲染管线出现状态突变或网格撕裂。
+- **模块化集成与事件驱动架构 (Modular Integration & Event-Driven Architecture):**
+  - **网络生命周期与逻辑解耦：** 依托 TurboLink 插件生成 UE 端 gRPC 存根 (Stubs)，将 RPC 会话生命周期 (Session Management) 与表现层核心驱动组件 `UAvatarStreamingComponent` 进行边界隔离，提升模块的可测试性与复用度。
+  - **泛用型组件化封装：** 遵循高内聚低耦合原则，封装基于委托 (Delegate) 的事件驱动接口 (`SendChatText`, `InterruptAndFlush`) 并暴露至蓝图虚拟机。实现了底层 C++ 驱动逻辑与上层美术表现的彻底解耦，开发者可将该组件零侵入式挂载至任意标准 Skeletal Mesh 资产。
 
 ## 版本
 
