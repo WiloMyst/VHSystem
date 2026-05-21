@@ -1,6 +1,6 @@
 # AI Avatar Streaming Engine (AI数字人流式交互双端引擎)
 
-[![license](https://img.shields.io/badge/license-MIT-blue)](https://github.com/WiloMyst/OpenWorldARPG/blob/master/LICENSE) [![GitHub repo size](https://img.shields.io/github/repo-size/WiloMyst/VHSystem)](https://github.com/WiloMyst/VHSystem)
+[![license](https://img.shields.io/badge/license-MIT-blue)](https://github.com/WiloMyst/VHSystem/blob/master/LICENSE) [![GitHub repo size](https://img.shields.io/github/repo-size/WiloMyst/VHSystem)](https://github.com/WiloMyst/VHSystem)
 
 
 
@@ -21,7 +21,7 @@
 ### 服务端 (C++ Backend)
 
 - **基于 gRPC 的高并发双向流底座 (Bidirectional Streaming):**
-  - **异步微服务调度：** 摒弃传统的请求-阻塞模型，采用 gRPC 异步双向流。前端发送文本后，后端持续、分块地将生成的 PCM 音频与 BlendShape 数据推送至客户端，将首帧响应时间 (TTFT) 压榨至极致。
+  - **异步微服务调度：** 摒弃传统的请求-阻塞模型，采用 gRPC 异步双向流。前端发送文本后，后端持续、分块地将生成的 PCM 音频与 BlendShape 数据推送至客户端，将首音频响应时间 (TTFA) 压榨至极致。
   - **背压保护的线程池 (Backpressure ThreadPool)：** 核心层完全剥离网络 I/O 与 AI 推理。自研带熔断机制的 C++ 线程池，当高并发请求打满 `max_queue_size` 时触发优雅降级，防止系统 OOM 崩溃。
 - **异构推理与零拷贝内存管理 (Zero-Copy Memory Management):**
   - **RAII 内存池架构：** 针对高频的视音频 Tensor 构建，彻底摒弃运行时的 Heap Allocation。基于自定义智能指针删除器 (Custom Deleter) 编写了高性能 `BufferPool`，实现内存块的无锁借还。
@@ -53,10 +53,10 @@
 - [thejinchao / turbolink](https://www.google.com/search?q=https://github.com/thejinchao/turbolink) - UE5 gRPC 快速集成插件
 - [gabime / spdlog](https://www.google.com/search?q=https://github.com/gabime/spdlog) - 后端高性能异步日志
 - [jbeder / yaml-cpp](https://www.google.com/search?q=https://github.com/jbeder/yaml-cpp) - 配置文件解析
+- ggerganov/llama.cpp - 轻量级大模型推理引擎
 
 **Models:**
 
 - [rhasspy / piper](https://www.google.com/search?q=https://github.com/rhasspy/piper) - 轻量级且极速的 VITS TTS 引擎
 - Qwen2.5-1.5B - 通义千问15亿参数版
-- Ollama - LLM本地部署工具
 
