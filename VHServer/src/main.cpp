@@ -8,7 +8,7 @@ using namespace engine::infra;
 int main() {
     // python3 -m grpc_tools.protoc -I./protos --python_out=./protos --grpc_python_out=./protos ./protos/avatarStream.proto
 
-    // 1. 屏蔽系统代理，防止 gRPC 抽风
+    // 1. 屏蔽系统代理，防止 gRPC 网络问题
     setenv("http_proxy", "", 1);
     setenv("https_proxy", "", 1);
     setenv("all_proxy", "", 1);
