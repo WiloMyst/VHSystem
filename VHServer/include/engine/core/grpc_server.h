@@ -16,8 +16,10 @@ public:
     GrpcServer();
     ~GrpcServer();
 
-    void Run(const std::string& host, int port, int threads, 
-             int max_queue, const std::string& tts_model_path, const std::string& v2f_model_path);
+    void Run(const std::string& host, int port, int threads, int max_queue, 
+             const std::string& llm_model_path, 
+             const std::string& tts_model_path, 
+             const std::string& v2f_model_path);
 
 private:
     void HandleRpcs();

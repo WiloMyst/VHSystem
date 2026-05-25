@@ -4,6 +4,7 @@ server:
   worker_threads: 4    # 业务线程池数量
 
 ai_brain:
+  llm_model_path: "../models/qwen2.5-1.5b-chat-q4_k_m.gguf"
   tts_model_path: "../models/zh_CN-huayan-medium.onnx"
   v2f_model_path: "../models/dummy_v2f.onnx"
   intra_op_threads: 1  # ONNX算子内部线程数

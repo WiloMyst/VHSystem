@@ -1,4 +1,3 @@
-// 路径：include/engine/infra/config_manager.hpp
 #pragma once
 #include <string>
 #include <stdexcept>
@@ -12,6 +11,8 @@ struct AppConfig {
     std::string host;
     int port;
     int worker_threads;
+
+    std::string llm_model_path;
     std::string tts_model_path;
     std::string v2f_model_path;
 };
@@ -24,6 +25,7 @@ inline AppConfig LoadConfig(const std::string& filepath) {
         config.port = node["server"]["port"].as<int>();
         config.worker_threads = node["server"]["worker_threads"].as<int>();
         
+        config.llm_model_path = node["ai_brain"]["llm_model_path"].as<std::string>();
         config.tts_model_path = node["ai_brain"]["tts_model_path"].as<std::string>();
         config.v2f_model_path = node["ai_brain"]["v2f_model_path"].as<std::string>();
         

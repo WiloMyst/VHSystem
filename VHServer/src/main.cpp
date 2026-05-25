@@ -25,9 +25,10 @@ int main() {
         engine::core::GrpcServer server;
         int max_queue_size = 1000;
         
-        // 传入两个模型的路径
         server.Run(config.host, config.port, config.worker_threads, max_queue_size, 
-                   config.tts_model_path, config.v2f_model_path);
+                   config.llm_model_path, 
+                   config.tts_model_path, 
+                   config.v2f_model_path);
         
     } catch (const std::exception& e) {
         spdlog::critical("引擎致命错误: {}", e.what());

@@ -41,8 +41,10 @@ GrpcServer::~GrpcServer() {
     }
 }
 
-void GrpcServer::Run(const std::string& host, int port, int threads, 
-                     int max_queue, const std::string& tts_model_path, const std::string& v2f_model_path) {
+void GrpcServer::Run(const std::string& host, int port, int threads, int max_queue, 
+                     const std::string& llm_model_path, 
+                     const std::string& tts_model_path, 
+                     const std::string& v2f_model_path) {
     
     std::string server_address = host + ":" + std::to_string(port);
     grpc::ServerBuilder builder;
@@ -70,7 +72,7 @@ void GrpcServer::Run(const std::string& host, int port, int threads,
 
     // 5. 初始化核心基础设施组件 (线程池与 AI 业务中枢)
     pool_ = std::make_unique<infra::ThreadPool>(threads, max_queue);
-    brain_ = std::make_unique<business::AIBrain>(tts_model_path, v2f_model_path);
+    brain_ = std::make_unique<business::AIBrain>(llm_model_path, tts_model_path, v2f_model_path);
 
     // 6. 进入阻塞式 I/O 事件分发循环
     HandleRpcs();

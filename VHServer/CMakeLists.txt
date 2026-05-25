@@ -67,6 +67,7 @@ add_executable(vh_server
     src/business/ai_brain.cpp 
     src/business/models/piper_tts_model.cpp 
     src/business/models/audio2face_model.cpp
+    src/business/models/qwen_llama_engine.cpp
     "${GENERATED_DIR}/avatarStream.pb.cc" 
     "${GENERATED_DIR}/avatarStream.grpc.pb.cc"
 )
@@ -77,6 +78,7 @@ add_executable(vh_server
 # 5.1 引入头文件目录 (PRIVATE 表示这些头文件仅供 vh_server 内部使用)
 target_include_directories(vh_server PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include" 
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp" 
     "${GENERATED_DIR}" 
     ${GRPC_INCLUDE_DIRS} 
     ${PROTOBUF_INCLUDE_DIRS} 
@@ -97,4 +99,6 @@ target_link_libraries(vh_server PRIVATE
     onnxruntime
     nlohmann_json::nlohmann_json
     pthread
+    llama 
+    ggml
 )
