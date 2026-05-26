@@ -64,7 +64,7 @@
 - [thejinchao/turbolink](https://www.google.com/search?q=https://github.com/thejinchao/turbolink) - UE5 gRPC 快速集成插件
 - [gabime/spdlog](https://www.google.com/search?q=https://github.com/gabime/spdlog) - 后端高性能异步日志
 - [jbeder/yaml-cpp](https://www.google.com/search?q=https://github.com/jbeder/yaml-cpp) - 配置文件解析
-- [ggml-org/llama.cpp]([ggml-org/llama.cpp: LLM inference in C/C++](https://github.com/ggml-org/llama.cpp)) - 轻量级大模型推理引擎
+- [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) - 轻量级大模型推理引擎
 
 **Models:**
 
