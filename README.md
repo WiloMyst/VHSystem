@@ -1,4 +1,4 @@
-# 基于大模型与 TTS 推理的虚拟人流式交互引擎
+# 基于大模型与多模态推理的虚拟人流式驱动引擎
 
 [![license](https://img.shields.io/badge/license-MIT-blue)](https://github.com/WiloMyst/VHSystem/blob/master/LICENSE) [![GitHub repo size](https://img.shields.io/github/repo-size/WiloMyst/VHSystem)](https://github.com/WiloMyst/VHSystem)
 
