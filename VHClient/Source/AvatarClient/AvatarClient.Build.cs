@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright 2025 WiloMyst. All Rights Reserved.
 
 using UnrealBuildTool;
 
@@ -19,7 +19,8 @@ public class AvatarClient : ModuleRules
 			"GameplayStateTreeModule",
 			"UMG",
 			"Slate",
-			"TurboLinkGrpc"
+            "AudioMixer",
+            "TurboLinkGrpc"
         });
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });

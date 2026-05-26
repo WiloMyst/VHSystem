@@ -1,6 +1,7 @@
-﻿// Fill out your copyright notice in the Description page of Project Settings.
+﻿// Copyright 2025 WiloMyst. All Rights Reserved.
 
 #include "Core/AvatarStreamingComponent.h"
+#include "Core/AvatarSynthComponent.h"
 #include "TurboLinkGrpcUtilities.h"
 #include "TurboLinkGrpcManager.h"
 
@@ -23,13 +24,15 @@ const FName UAvatarStreamingComponent::ARKitBlendShapeNames[52] = {
 
 UAvatarStreamingComponent::UAvatarStreamingComponent()
 {
+    // 启用组件 Tick，用于驱动面部动画与状态机检测
     PrimaryComponentTick.bCanEverTick = true;
     AvatarClient = nullptr;
 
     // 核心时钟与渲染参数初始化
     AnimationFPS = 30.0f;
     CurrentAudioTime = 0.0f;
-    CurrentBlendShapes.Init(0.0f, 52); 
+    bIsNetworkStreamEnded = false;
+    CurrentBlendShapes.Init(0.0f, 52);
 }
 
 void UAvatarStreamingComponent::BeginPlay()
@@ -37,34 +40,21 @@ void UAvatarStreamingComponent::BeginPlay()
     Super::BeginPlay();
 
     // ====================================================================
-    // 1. 初始化程序化音频流生成器 (Procedural Audio)
-    // ====================================================================
-    ProceduralSoundWave = NewObject<USoundWaveProcedural>(this);
-    ProceduralSoundWave->SetSampleRate(22050); // 必须与后端 TTS 引擎输出采样率严格对齐
-    ProceduralSoundWave->NumChannels = 1;      // 单声道流
-    ProceduralSoundWave->bLooping = false;
-    ProceduralSoundWave->bProcedural = true;
-    ProceduralSoundWave->SoundGroup = SOUNDGROUP_Voice;
-
-    // 关键配置：规避 UE 引擎垃圾回收机制的隐式释放。
-    // 设置极大 Duration 值以维持音频流通道的持续挂起状态，等待分片数据注入。
-    ProceduralSoundWave->Duration = 10000.f;
-
-    // ====================================================================
-    // 2. 挂载音频播放组件至宿主 Actor
+    // 1. 挂载现代音频合成组件 (USynthComponent)
     // ====================================================================
     AActor* OwnerActor = GetOwner();
     if (OwnerActor)
     {
-        AudioPlayer = NewObject<UAudioComponent>(OwnerActor);
-        AudioPlayer->SetupAttachment(OwnerActor->GetRootComponent());
-        AudioPlayer->SetSound(ProceduralSoundWave);
-        AudioPlayer->bAutoActivate = false; // 禁用自动播放，由网络缓冲状态接管
-        AudioPlayer->RegisterComponent();
+        SynthPlayer = NewObject<UAvatarSynthComponent>(OwnerActor);
+        SynthPlayer->SetupAttachment(OwnerActor->GetRootComponent());
+        SynthPlayer->RegisterComponent();
+
+        // 启动合成器。底层音频渲染线程开始轮询，无数据时默认输出静音
+        SynthPlayer->Start();
     }
 
     // ====================================================================
-    // 3. 构建 gRPC 双向流网络链路
+    // 2. 构建 gRPC 双向流网络链路
     // ====================================================================
     UTurboLinkGrpcManager* GrpcManager = UTurboLinkGrpcUtilities::GetTurboLinkGrpcManager(this);
     if (!GrpcManager)
@@ -82,14 +72,14 @@ void UAvatarStreamingComponent::BeginPlay()
 
     AvatarService->Connect();
     AvatarClient = AvatarService->MakeClient();
-    
+
     if (!AvatarClient)
     {
         UE_LOG(LogTemp, Error, TEXT("[AvatarStreaming] 核心故障：AvatarClient 创建失败。"));
         return;
     }
 
-    // 绑定异步网络 I/O 委托
+    // 绑定异步网络 I/O 回调委托
     AvatarClient->OnChatWithAvatarResponse.AddDynamic(this, &UAvatarStreamingComponent::OnChatResponseReceived);
     AvatarClient->OnChatWithAvatarWriteComplete.AddDynamic(this, &UAvatarStreamingComponent::OnChatWriteComplete);
 
@@ -102,7 +92,7 @@ void UAvatarStreamingComponent::EndPlay(const EEndPlayReason::Type EndPlayReason
 {
     if (AvatarClient)
     {
-        // 解绑动态委托，防止生命周期结束后的野指针回调 (Dangling Pointers)
+        // 解绑动态委托，防御生命周期结束后的悬垂指针 (Dangling Pointers)
         AvatarClient->OnChatWithAvatarResponse.RemoveDynamic(this, &UAvatarStreamingComponent::OnChatResponseReceived);
         AvatarClient->OnChatWithAvatarWriteComplete.RemoveDynamic(this, &UAvatarStreamingComponent::OnChatWriteComplete);
 
@@ -130,45 +120,37 @@ void UAvatarStreamingComponent::SendChatText(const FString& InText)
     Request.TextPayload = InText;
     Request.IsEndOfStream = false;
 
-    // 执行异步非阻塞写操作
+    // 执行异步非阻塞网络写操作
     AvatarClient->ChatWithAvatar(CurrentSessionHandle, Request);
     UE_LOG(LogTemp, Log, TEXT("[AvatarStreaming] 上行请求已发出，Payload: %s"), *InText);
 }
 
 void UAvatarStreamingComponent::InterruptAndFlush()
 {
-    // 1. 终止历史网络流：断开旧句柄并重新初始化，丢弃网络层残留的幽灵分片
+    // 1. 终止历史网络流：断开旧句柄并重新初始化，丢弃网络层残留的分片
     if (AvatarClient)
     {
         AvatarClient->TryCancel(CurrentSessionHandle);
-        CurrentSessionHandle = AvatarClient->InitChatWithAvatar(); 
+        CurrentSessionHandle = AvatarClient->InitChatWithAvatar();
     }
 
-    // 2. 硬件渲染重置：停止当前音频流播放
-    if (AudioPlayer && AudioPlayer->IsPlaying())
+    // 2. 音频与时钟重置
+    if (SynthPlayer)
     {
-        AudioPlayer->Stop();
+        SynthPlayer->ResetAudioState();
     }
 
-    // 3. 音频底层缓冲清理：清空 ProceduralSoundWave 中已排队的数据
-    if (ProceduralSoundWave)
-    {
-        ProceduralSoundWave->ResetAudio();
-    }
-
-    // 4. 无锁队列强制清空：由于 TQueue 不支持批量 Clear，此处执行迭代出队
-    TArray<uint8> TempAudio;
-    while (AudioPCMQueue.Dequeue(TempAudio)) {}
-
+    // 3. 无锁队列强制清空：迭代出队以清空缓存
     TArray<float> TempFrame;
     while (BlendShapeQueue.Dequeue(TempFrame)) {}
 
-    // 5. 核心状态机复位
-    QueuedChunkCounter.Reset();  // 重置背压原子计数器
+    // 4. 核心状态机全面复位
+    QueuedChunkCounter.Reset();
     CurrentAudioTime = 0.0f;
     FrameBuffer.Empty();
+    bIsNetworkStreamEnded = false;
 
-    // 6. 面部权重归零：确保动画网络中断后，目标模型恢复至初始状态
+    // 5. 面部权重归零：确保动画网络中断后，角色面部恢复至初始状态
     for (int32 i = 0; i < 52; ++i)
     {
         CurrentBlendShapes[i] = 0.0f;
@@ -180,7 +162,7 @@ void UAvatarStreamingComponent::InterruptAndFlush()
 void UAvatarStreamingComponent::OnChatWriteComplete(FGrpcContextHandle Handle)
 {
     if (!UTurboLinkGrpcUtilities::EqualEqual_GrpcContextHandle(Handle, CurrentSessionHandle)) return;
-    // 留存接口：可扩展用于上行发送速率控制
+    // 留存接口：可扩展用于上行发送速率控制与背压探测
 }
 
 void UAvatarStreamingComponent::OnChatResponseReceived(FGrpcContextHandle Handle, const FGrpcResult& GrpcResult, const FGrpcAvatarAvatarStreamResponse& Response)
@@ -188,35 +170,47 @@ void UAvatarStreamingComponent::OnChatResponseReceived(FGrpcContextHandle Handle
     // 鉴权校验：抛弃非当前活动 Session 的残影数据
     if (!UTurboLinkGrpcUtilities::EqualEqual_GrpcContextHandle(Handle, CurrentSessionHandle)) return;
 
+    // 底层网络异常（如后端未启动、断网）
     if (GrpcResult.Code != EGrpcResultCode::Ok)
     {
-        UE_LOG(LogTemp, Error, TEXT("[AvatarStreaming] 底层网络 I/O 异常: %s"), *GrpcResult.GetMessageString());
+        FString ErrString = FString::Printf(TEXT("网络连接失败: %s"), *GrpcResult.GetMessageString());
+        UE_LOG(LogTemp, Error, TEXT("[AvatarStreaming] %s"), *ErrString);
+
+        OnStreamError.Broadcast(ErrString);
+        OnStreamComplete.Broadcast();
         return;
     }
 
+    // 云端模型抛出异常
     if (!Response.Success)
     {
-        UE_LOG(LogTemp, Error, TEXT("[AvatarStreaming] 云端 AI 引擎拒接服务: %s"), *Response.ErrorMsg);
+        FString ErrString = FString::Printf(TEXT("AI 引擎异常: %s"), *Response.ErrorMsg);
+        UE_LOG(LogTemp, Error, TEXT("[AvatarStreaming] %s"), *ErrString);
+
+        OnStreamError.Broadcast(ErrString);
+        OnStreamComplete.Broadcast();
         return;
     }
 
     // ====================================================================
-    // 客户端防线一：端侧硬熔断 (Circuit Breaker)
+    // 端侧硬熔断机制 (Circuit Breaker)
     // 防止云端高频发包引发 UE5 端侧物理内存耗尽 (OOM)
     // ====================================================================
     if (QueuedChunkCounter.GetValue() > MaxQueueChunks)
     {
-        UE_LOG(LogTemp, Error, TEXT("[AvatarStreaming] 熔断触发：端侧缓冲池积压超出阈值 (Current: %d, Max: %d)。强制截断当前流！"), 
-               QueuedChunkCounter.GetValue(), MaxQueueChunks);
+        UE_LOG(LogTemp, Error, TEXT("[AvatarStreaming] 熔断触发：端侧缓冲池积压超出阈值。强制截断当前流！"));
         InterruptAndFlush();
         return;
     }
 
-    // 异步数据入列操作
-    if (Response.AudioPcm.Value.Num() > 0)
+    // ====================================================================
+    // 音频与面部数据分发
+    // ====================================================================
+    if (Response.AudioPcm.Value.Num() > 0 && SynthPlayer)
     {
-        AudioPCMQueue.Enqueue(Response.AudioPcm.Value);
-        QueuedChunkCounter.Increment(); // 背压计数累加
+        // 音频数据直接投递给现代合成器，底层音频线程将自动消费
+        SynthPlayer->QueueAudio(Response.AudioPcm.Value);
+        QueuedChunkCounter.Increment(); // 记录背压水位
     }
 
     if (Response.Frames.Num() > 0)
@@ -226,43 +220,26 @@ void UAvatarStreamingComponent::OnChatResponseReceived(FGrpcContextHandle Handle
             BlendShapeQueue.Enqueue(Frame.Weights);
         }
     }
+
+    // 检测网络流结束标志 (EOF)
+    if (Response.IsEndOfStream)
+    {
+        UE_LOG(LogTemp, Log, TEXT("[AvatarStreaming] 接收到网络流 EOF 标志，等待本地动画序列执行完毕..."));
+        bIsNetworkStreamEnded = true;
+    }
 }
 
 void UAvatarStreamingComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-    if (!ProceduralSoundWave) return;
-
     // ====================================================================
-    // 1. 音频数据流消费 (Audio PCM Stream Consumption)
-    // ====================================================================
-    TArray<uint8> PCMChunk;
-    bool bHasNewAudio = false;
-
-    while (AudioPCMQueue.Dequeue(PCMChunk))
-    {
-        QueuedChunkCounter.Decrement(); // 消费成功，释放背压额度
-
-        if (PCMChunk.Num() > 0)
-        {
-            ProceduralSoundWave->QueueAudio(PCMChunk.GetData(), PCMChunk.Num());
-            bHasNewAudio = true;
-        }
-    }
-
-    // 检测到新缓冲切片且处于静音状态时，触发播放
-    if (bHasNewAudio && AudioPlayer && !AudioPlayer->IsPlaying())
-    {
-        AudioPlayer->Play();
-    }
-
-    // ====================================================================
-    // 2. 面部渲染数据流消费 (Animation Frame Buffer Update)
+    // 1. 面部渲染数据流消费 (Animation Frame Buffer Update)
     // ====================================================================
     TArray<float> FrameData;
     while (BlendShapeQueue.Dequeue(FrameData))
     {
+        QueuedChunkCounter.Decrement(); // 消费成功，释放背压额度
         if (FrameData.Num() == 52)
         {
             FrameBuffer.Add(FrameData);
@@ -270,28 +247,24 @@ void UAvatarStreamingComponent::TickComponent(float DeltaTime, ELevelTick TickTy
     }
 
     // ====================================================================
-    // 3. 核心驱动：基于音频主时钟 (Audio Master Clock) 的渲染同步
+    // 2. 面部动画帧序列插值渲染
     // ====================================================================
-    if (AudioPlayer && AudioPlayer->IsPlaying())
+    if (FrameBuffer.Num() > 0)
     {
-        CurrentAudioTime += DeltaTime;
+        // 向底层合成器索要绝对物理时间
+        if (SynthPlayer)
+        {
+            CurrentAudioTime = SynthPlayer->GetCurrentAudioTime();
+        }
 
         float ExactFrame = CurrentAudioTime * AnimationFPS;
         int32 FrameIndex0 = FMath::FloorToInt(ExactFrame);
 
-        // ====================================================================
-        // 客户端防线二：滑动窗口历史帧垃圾回收 (Garbage Collection)
-        // 防治超长文本输入导致 FrameBuffer 数组无限膨胀引发的内存泄漏
-        // ====================================================================
-        if (FrameIndex0 > 150) // 积压超出约 5 秒历史数据
+        // 历史帧垃圾回收 (Garbage Collection)：截断过期帧防内存泄漏
+        if (FrameIndex0 > 150)
         {
-            // 执行内存截断
             FrameBuffer.RemoveAt(0, FrameIndex0);
-            
-            // 同步调整时钟轴向后偏移
             CurrentAudioTime -= (static_cast<float>(FrameIndex0) / AnimationFPS);
-            
-            // 重新校准当前帧索引
             ExactFrame = CurrentAudioTime * AnimationFPS;
             FrameIndex0 = FMath::FloorToInt(ExactFrame);
         }
@@ -303,10 +276,10 @@ void UAvatarStreamingComponent::TickComponent(float DeltaTime, ELevelTick TickTy
         if (FrameIndex0 < FrameBuffer.Num())
         {
             const TArray<float>& Shapes0 = FrameBuffer[FrameIndex0];
-            
+
             if (FrameIndex1 < FrameBuffer.Num())
             {
-                // 网络稳定：执行帧间线性插值，将 30FPS 平滑补偿至 UE5 客户端渲染帧率
+                // 执行帧间线性插值，将云端 30FPS 平滑补偿至 UE5 本地高渲染帧率
                 const TArray<float>& Shapes1 = FrameBuffer[FrameIndex1];
                 for (int32 i = 0; i < 52; ++i)
                 {
@@ -315,7 +288,7 @@ void UAvatarStreamingComponent::TickComponent(float DeltaTime, ELevelTick TickTy
             }
             else
             {
-                // 轻微网络抖动 (Jitter)：仅收到单帧，保持静态降级
+                // 抵达当前缓冲末尾，保持静态
                 CurrentBlendShapes = Shapes0;
             }
         }
@@ -323,16 +296,28 @@ void UAvatarStreamingComponent::TickComponent(float DeltaTime, ELevelTick TickTy
     else
     {
         // ====================================================================
-        // 网络饥饿状态 (Starvation) 异常处理
+        // 网络饥饿或播放结束状态：执行面部权重平滑衰减
         // ====================================================================
-        // 1. 强制锁死时间轴边界，防止音频停止时画面渲染轴溢出至未知空间
-        CurrentAudioTime = static_cast<float>(FrameBuffer.Num()) / AnimationFPS;
-
-        // 2. 执行静态面部权重衰减，避免角色面容冻结在夸张表情上
+        CurrentAudioTime = 0.0f;
         for (int32 i = 0; i < 52; ++i)
         {
             CurrentBlendShapes[i] = FMath::FInterpTo(CurrentBlendShapes[i], 0.0f, DeltaTime, 15.0f);
         }
+    }
+
+    // ====================================================================
+    // 3. 终极状态机检测：流生命周期闭环与 UI 恢复广播
+    // ====================================================================
+    // 触发条件：网络宣告下发完毕 && 本地面部动画缓冲已被完全消费
+    if (bIsNetworkStreamEnded && FrameBuffer.IsEmpty())
+    {
+        UE_LOG(LogTemp, Log, TEXT("[AvatarStreaming] 对话生命周期完整闭环！执行 UI 恢复广播。"));
+
+        // 触发多播委托，通知 UI 组件开放下一次输入
+        OnStreamComplete.Broadcast();
+
+        // 务必复位标志位，防止下一帧发生重复广播
+        bIsNetworkStreamEnded = false;
     }
 }
 
