@@ -12,6 +12,114 @@
 
 
 
+## 系统架构
+
+```mermaid
+%%{init: {'theme': 'dark', 'themeVariables': { 'primaryColor': '#232946', 'primaryBorderColor': '#00E5FF', 'lineColor': '#00E5FF' }}}%%
+graph TB
+    subgraph Client["UE5 客户端"]
+        UI["用户输入 / 蓝图 UI"]
+        ASC["UAvatarStreamingComponent<br/>核心驱动组件"]
+        SYN["UAvatarSynthComponent<br/>流式音频合成"]
+        TQ1["TQueue&lt;FPendingResponse&gt;<br/>响应缓冲队列"]
+        PROC["ProcessPendingResponses<br/>GameThread 分发"]
+        TQ2["TQueue&lt;TArray&lt;float&gt;&gt;<br/>表情帧队列"]
+        FB["FrameBuffer<br/>随机访问帧数组"]
+        LERP["Lerp 帧插值<br/>音频时钟同步"]
+        DAMP["FInterpTo 阻尼回落<br/>饥饿保护"]
+        MESH["Skeletal Mesh<br/>MetaHuman 面部"]
+        TL["TurboLink<br/>gRPC Stubs"]
+    end
+
+    subgraph Network["gRPC 双向流"]
+        BIDI["ChatWithAvatar<br/>stream ↔ stream"]
+    end
+
+    subgraph Server["C++ 后端引擎"]
+        GS["GrpcServer<br/>AsyncEventLoop"]
+        AS["AvatarSession<br/>会话状态机"]
+        TP0["ThreadPool<br/>背压熔断"]
+        AB["AIBrain<br/>管线编排器"]
+
+        subgraph Pipeline["异构推理管线"]
+            TP1["LLM ThreadPool"]
+            LLM["QwenLlamaEngine<br/>llama.cpp"]
+            TP2["TTS ThreadPool"]
+            TTS["PiperTTSModel<br/>ONNX Runtime (CPU)"]
+            TP3["V2F ThreadPool"]
+            V2F["Audio2FaceModel<br/>ONNX Runtime (GPU)<br/>BufferPool 池化内存"]
+        end
+    end
+
+    subgraph NLP["NLP 微服务 (Python)"]
+        NLP_S["nlp_server.py<br/>TCP :50052"]
+        PH["piper-phonemize<br/>文本 → 音素 ID"]
+    end
+
+    %% 客户端数据流
+    UI -->|"SendChatText"| ASC
+    ASC -->|"ChatWithAvatar"| TL
+    TL -->|"gRPC 上行"| BIDI
+    BIDI -->|"gRPC 上行"| GS
+    BIDI ==>|"gRPC 下行<br/>⚡async"| TL
+    TL ==>|"OnChatResponseReceived<br/>⚡async 网络 I/O 线程"| TQ1
+    TQ1 -->|"Dequeue<br/>GameThread Tick"| PROC
+    PROC ==>|"QueueAudio<br/>⚡async 音频渲染线程"| SYN
+    PROC -->|"Enqueue Frames"| TQ2
+    PROC -.->|"bIsError<br/>OnStreamError"| UI
+    TQ2 -->|"Dequeue → FrameBuffer.Add"| FB
+    FB -->|"有帧"| LERP
+    SYN -->|"CurrentAudioTime"| LERP
+    LERP -->|"CurrentBlendShapes"| MESH
+    FB -->|"帧耗尽"| DAMP
+    DAMP -->|"平滑回零"| MESH
+    FB -.->|"帧耗尽 + 流EOF<br/>OnStreamComplete"| UI
+
+    %% 服务端数据流
+    GS -->|"HandleRpcs<br/>CQ 事件驱动"| AS
+    AS ==>|"pool_->enqueue<br/>⚡async 跨线程"| TP0
+    TP0 -->|"执行 InferStream"| AB
+
+    %% 推理管线
+    AB ==>|"llm_pipeline_->enqueue<br/>⚡async 跨线程"| TP1
+    TP1 --> LLM
+    LLM ==>|"tts_pipeline_->enqueue<br/>⚡async 跨线程"| TP2
+    TP2 --> TTS
+    TTS -.->|"1.TextToPhonemes<br/>sync 阻塞 TCP IPC"| NLP_S
+    NLP_S --> PH
+    PH -.->|"phoneme_ids"| TTS
+    TTS -->|"2.tts_model_->Forward<br/>音素ID → PCM<br/>sync 同线程"| TTS
+    TTS ==>|"3.v2f_pipeline_->enqueue<br/>⚡async 跨线程"| TP3
+    TP3 -->|"Forward 面部映射<br/>sync 同线程"| V2F
+    V2F ==>|"on_chunk_ready 回调<br/>⚡async 跨线程"| AS
+    AS -->|"EnqueueWrite<br/>IssueWrite"| GS
+    GS ==>|"gRPC 下行<br/>⚡async CQ 异步写"| BIDI
+
+    %% 子图样式设置
+    style Client fill:#1a1a2e,stroke:#e94560,color:#fff
+    style Server fill:#16213e,stroke:#0f3460,color:#fff
+    style NLP fill:#1a1a2e,stroke:#533483,color:#fff
+    style Network fill:#0f3460,stroke:#e94560,color:#fff
+    style Pipeline fill:#0a1128,stroke:#1282a2,color:#fff
+
+    %% 强制全局连线样式
+    linkStyle default stroke:#00E5FF,stroke-width:2px,color:white
+```
+
+### 数据流概要
+
+```
+用户文本 → gRPC 上行 → AvatarSession → AIBrain 管线编排
+    → [1] LLM (llama.cpp) 流式生成 + 标点断句
+    → [2] NLP 微服务 (piper-phonemize) 文本→音素ID
+    → [3] TTS (ONNX/CPU) 音素ID→PCM音频
+    → [4] V2F (ONNX/GPU) PCM音频→52维BlendShape帧
+    → gRPC 下行分块 → 客户端 TQueue 缓冲
+    → USynthComponent 音频播放 + Lerp 帧插值 → MetaHuman 面部驱动
+```
+
+
+
 ## 演示
 
 [Image01](assets/Image01.jpg)
