@@ -54,9 +54,8 @@ private:
     std::queue<Avatar::AvatarStreamResponse> write_queue_;
     bool is_writing_;
     
-    // 标记当前 gRPC 双向流是否还活着
     std::atomic<bool> is_active_{true};
-    // 请求世代号。每次收到新文本就 +1
+    std::atomic<bool> is_finishing_{false};
     std::atomic<uint64_t> current_request_id_{0};
 };
 

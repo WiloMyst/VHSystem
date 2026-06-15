@@ -8,6 +8,7 @@
 #include <future>
 #include <stdexcept>
 #include <optional>
+#include <type_traits>
 
 namespace engine { 
 namespace infra { 
@@ -39,9 +40,9 @@ public:
     // 企业级改造：返回 std::optional。如果队列满了，返回空，触发业务熔断
     template<class F, class... Args>
     auto enqueue(F&& f, Args&&... args) 
-        -> std::optional<std::future<typename std::result_of<F(Args...)>::type>> 
+        -> std::optional<std::future<std::invoke_result_t<F, Args...>>> 
     {
-        using return_type = typename std::result_of<F(Args...)>::type;
+        using return_type = std::invoke_result_t<F, Args...>;
         auto task = std::make_shared<std::packaged_task<return_type()>>(
             std::bind(std::forward<F>(f), std::forward<Args>(args)...)
         );

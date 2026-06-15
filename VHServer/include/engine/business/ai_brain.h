@@ -90,24 +90,15 @@ private:
     // ====================================================================
     // 网络层 (Network Layer): 跨进程 NLP 微服务通信基建
     // ====================================================================
-    int nlp_socket_ = -1;       // TCP 长连接套接字描述符
-    std::mutex nlp_mutex_;      // 保证 TCP 报文串行化写入的通信锁
+    int nlp_socket_ = -1;
+    std::mutex nlp_mutex_;
+    static constexpr int NLP_MAX_RETRIES = 3;
+    static constexpr int NLP_RECV_TIMEOUT_SEC = 15;
+    static constexpr int NLP_SEND_TIMEOUT_SEC = 10;
     
-    /**
-     * @brief 建立与 Python NLP 微服务的 IPC 通信链路
-     */
     void InitNlpConnection();
-    
-    /**
-     * @brief 安全回收套接字与通信资源
-     */
     void CloseNlpConnection();
-
-    /**
-     * @brief 同步 RPC 调用：发起中文字符串到标准音素 ID 序列的底层映射
-     * @param text 剥离了标点符号的最小语义语句
-     * @return std::vector<int64_t> 序列化后的音素数组
-     */
+    bool EnsureNlpConnection();
     std::vector<int64_t> TextToPhonemes(const std::string& text);
 };
 

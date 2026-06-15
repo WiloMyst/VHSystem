@@ -26,7 +26,7 @@ private:
     static constexpr size_t MAX_CHUNK_SAMPLES = 16384; 
 
     // 声明一个 float 类型的内存池智能指针
-    std::unique_ptr<infra::BufferPool<float>> tensor_pool_;
+    std::shared_ptr<infra::BufferPool<float>> tensor_pool_;
 };
 
 } // namespace models

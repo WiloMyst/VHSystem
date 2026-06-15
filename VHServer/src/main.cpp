@@ -2,6 +2,7 @@
 #include "engine/infra/logger_setup.hpp"
 #include "engine/infra/config_manager.hpp"
 #include "engine/core/grpc_server.h"
+#include <llama.h>
 
 using namespace engine::infra;
 
@@ -32,8 +33,10 @@ int main() {
         
     } catch (const std::exception& e) {
         spdlog::critical("引擎致命错误: {}", e.what());
+        llama_backend_free();
         return EXIT_FAILURE;
     }
 
+    llama_backend_free();
     return EXIT_SUCCESS;
 }

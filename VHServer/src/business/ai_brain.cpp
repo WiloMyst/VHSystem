@@ -6,6 +6,8 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <thread>
+#include <chrono>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -55,17 +57,30 @@ void AIBrain::InitNlpConnection() {
     serv_addr.sin_port = htons(50052);
 
     if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
-        throw std::runtime_error("[AIBrain] 致命错误：非法的 NLP 微服务网段地址。");
+        spdlog::error("[AIBrain] 非法的 NLP 微服务网段地址。");
+        close(nlp_socket_);
+        nlp_socket_ = -1;
+        return;
     }
 
     if (connect(nlp_socket_, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         close(nlp_socket_);
         nlp_socket_ = -1;
-        spdlog::warn("[AIBrain] 警告：NLP 微服务持久化连接 (Keep-Alive) 建立失败，系统将转入被动退避重试模式。");
+        spdlog::warn("[AIBrain] NLP 微服务连接建立失败，系统将转入被动退避重试模式。");
         return;
     }
+
+    struct timeval recv_timeout;
+    recv_timeout.tv_sec = NLP_RECV_TIMEOUT_SEC;
+    recv_timeout.tv_usec = 0;
+    setsockopt(nlp_socket_, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
+
+    struct timeval send_timeout;
+    send_timeout.tv_sec = NLP_SEND_TIMEOUT_SEC;
+    send_timeout.tv_usec = 0;
+    setsockopt(nlp_socket_, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
     
-    spdlog::info("[AIBrain] IPC (跨进程通信) 链路校验通过，NLP 长连接微服务已就绪。");
+    spdlog::info("[AIBrain] IPC 链路校验通过，NLP 长连接微服务已就绪。");
 }
 
 void AIBrain::CloseNlpConnection() {
@@ -75,22 +90,29 @@ void AIBrain::CloseNlpConnection() {
     }
 }
 
+bool AIBrain::EnsureNlpConnection() {
+    if (nlp_socket_ != -1) return true;
+    for (int attempt = 1; attempt <= NLP_MAX_RETRIES; ++attempt) {
+        spdlog::info("[AIBrain] NLP 重连尝试 ({}/{})...", attempt, NLP_MAX_RETRIES);
+        InitNlpConnection();
+        if (nlp_socket_ != -1) return true;
+        if (attempt < NLP_MAX_RETRIES) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500 * attempt));
+        }
+    }
+    return false;
+}
+
 // ========================================================================
 // 同步 RPC 调用：纯文本至音素序列的标准化映射
 // ========================================================================
 std::vector<int64_t> AIBrain::TextToPhonemes(const std::string& text) {
-    // 临界区保护：确保多线程并发访问 TCP 描述符时的指令序列化 (Linearizability)
     std::lock_guard<std::mutex> lock(nlp_mutex_);
 
-    // 工业级容灾机制：链路断层重连
-    if (nlp_socket_ == -1) {
-        InitNlpConnection();
-        if (nlp_socket_ == -1) {
-            throw std::runtime_error("[AIBrain] NLP 节点处于脱机状态，请求被强制熔断。");
-        }
+    if (!EnsureNlpConnection()) {
+        throw std::runtime_error("[AIBrain] NLP 节点处于脱机状态，重连均失败，请求被强制熔断。");
     }
 
-    // 协议定界符：追加 \n 作为 TCP 字节流解析的合法终止标志，防御粘包/半包
     std::string payload = text + "\n";
     
     if (send(nlp_socket_, payload.c_str(), payload.length(), MSG_NOSIGNAL) < 0) {
@@ -98,16 +120,27 @@ std::vector<int64_t> AIBrain::TextToPhonemes(const std::string& text) {
         throw std::runtime_error("[AIBrain] 上行数据分发失败，TCP 链路已被远端重置 (RST)。");
     }
 
-    char buffer[8192] = {0};
-    int valread = read(nlp_socket_, buffer, sizeof(buffer) - 1);
-    
-    if (valread <= 0) {
-        CloseNlpConnection();
-        throw std::runtime_error("[AIBrain] 下行响应帧拉取失败，探测到网络层 EOF。");
+    std::string response_line;
+    char read_buf[4096];
+    while (true) {
+        size_t newline_pos = response_line.find('\n');
+        if (newline_pos != std::string::npos) {
+            response_line.erase(newline_pos);
+            break;
+        }
+        int valread = read(nlp_socket_, read_buf, sizeof(read_buf));
+        if (valread <= 0) {
+            if (valread < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                CloseNlpConnection();
+                throw std::runtime_error("[AIBrain] NLP 响应超时，TCP 链路已强制回收。");
+            }
+            CloseNlpConnection();
+            throw std::runtime_error("[AIBrain] 下行响应帧拉取失败，探测到网络层 EOF。");
+        }
+        response_line.append(read_buf, valread);
     }
 
-    std::string response(buffer, valread);
-    json json_response = json::parse(response);
+    json json_response = json::parse(response_line);
 
     return json_response.get<std::vector<int64_t>>();
 }
@@ -122,7 +155,7 @@ void AIBrain::InferStream(const std::string& user_prompt,
     spdlog::info("[AIBrain] 会话接入，发起流式请求栈调度...");
 
     // 1. 将首节点生成任务抛入 LLM 独立线程，释放底层 gRPC Polling 线程
-    llm_pipeline_->enqueue([this, user_prompt, on_chunk_ready, is_cancelled]() {
+    auto enqueue_result = llm_pipeline_->enqueue([this, user_prompt, on_chunk_ready, is_cancelled]() {
         
         std::string sentence_buffer = "";
         const size_t SUB_CHUNK_SIZE = 8820; // 物理时钟对齐常量：严格匹配 0.4s 精度下的 12 帧动画数据
@@ -148,7 +181,14 @@ void AIBrain::InferStream(const std::string& user_prompt,
 
             // 当侦测到标点符号或触发 EOS 标志位时，触发管线流转
             if (has_punctuation || is_end) {
-                if (sentence_buffer.empty()) return;
+                if (sentence_buffer.empty()) {
+                    if (is_end) {
+                        ChunkResult end_chunk;
+                        end_chunk.is_last_chunk = true;
+                        on_chunk_ready(end_chunk);
+                    }
+                    return;
+                }
 
                 // 提取最小完整语义块，并清空当前累加器缓冲
                 std::string current_sentence = sentence_buffer;
@@ -217,6 +257,13 @@ void AIBrain::InferStream(const std::string& user_prompt,
             }
         }, is_cancelled);
     });
+
+    if (!enqueue_result.has_value()) {
+        spdlog::warn("[AIBrain] LLM 管线负载过高，触发背压熔断，请求被拒绝。");
+        ChunkResult err_chunk;
+        err_chunk.is_last_chunk = true;
+        on_chunk_ready(err_chunk);
+    }
 }
 
 } // namespace business

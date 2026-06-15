@@ -11,7 +11,7 @@ namespace models {
 Audio2FaceModel::Audio2FaceModel(const std::string& model_path) 
     : OnnxModelBase(model_path, 1, true) {
     // 初始化内存池。预留 4 块坑位供多线程并发调用
-    tensor_pool_ = std::make_unique<infra::BufferPool<float>>(4, MAX_CHUNK_SAMPLES);
+    tensor_pool_ = infra::BufferPool<float>::Create(16, MAX_CHUNK_SAMPLES);
     
     spdlog::info(" [V2F Model] Audio2Face 算子加载成功，准备生成面部表情数据.");
 }

@@ -1,4 +1,4 @@
-﻿// Copyright 2025 WiloMyst. All Rights Reserved.
+// Copyright 2025 WiloMyst. All Rights Reserved.
 
 #include "Core/AvatarStreamingComponent.h"
 #include "Core/AvatarSynthComponent.h"
@@ -24,15 +24,15 @@ const FName UAvatarStreamingComponent::ARKitBlendShapeNames[52] = {
 
 UAvatarStreamingComponent::UAvatarStreamingComponent()
 {
-    // 启用组件 Tick，用于驱动面部动画与状态机检测
     PrimaryComponentTick.bCanEverTick = true;
     AvatarClient = nullptr;
 
-    // 核心时钟与渲染参数初始化
     AnimationFPS = 30.0f;
     CurrentAudioTime = 0.0f;
     bIsNetworkStreamEnded = false;
     CurrentBlendShapes.Init(0.0f, 52);
+
+    SessionId = FString::Printf(TEXT("UE5_Session_%d_%d"), FPlatformTime::Cycles(), FMath::Rand());
 }
 
 void UAvatarStreamingComponent::BeginPlay()
@@ -115,7 +115,7 @@ void UAvatarStreamingComponent::SendChatText(const FString& InText)
     InterruptAndFlush();
 
     FGrpcAvatarAvatarStreamRequest Request;
-    Request.SessionId = TEXT("UE5_Session_001");
+    Request.SessionId = SessionId;
     Request.StreamType = TEXT("TEXT_INFER");
     Request.TextPayload = InText;
     Request.IsEndOfStream = false;
@@ -144,10 +144,14 @@ void UAvatarStreamingComponent::InterruptAndFlush()
     TArray<float> TempFrame;
     while (BlendShapeQueue.Dequeue(TempFrame)) {}
 
+    FPendingResponse TempPending;
+    while (PendingResponseQueue.Dequeue(TempPending)) {}
+
     // 4. 核心状态机全面复位
     QueuedChunkCounter.Reset();
     CurrentAudioTime = 0.0f;
     FrameBuffer.Empty();
+    FrameBufferOffset = 0;
     bIsNetworkStreamEnded = false;
 
     // 5. 面部权重归零：确保动画网络中断后，角色面部恢复至初始状态
@@ -167,71 +171,88 @@ void UAvatarStreamingComponent::OnChatWriteComplete(FGrpcContextHandle Handle)
 
 void UAvatarStreamingComponent::OnChatResponseReceived(FGrpcContextHandle Handle, const FGrpcResult& GrpcResult, const FGrpcAvatarAvatarStreamResponse& Response)
 {
-    // 鉴权校验：抛弃非当前活动 Session 的残影数据
     if (!UTurboLinkGrpcUtilities::EqualEqual_GrpcContextHandle(Handle, CurrentSessionHandle)) return;
 
-    // 底层网络异常（如后端未启动、断网）
+    FPendingResponse Pending;
+    Pending.bIsError = false;
+
     if (GrpcResult.Code != EGrpcResultCode::Ok)
     {
-        FString ErrString = FString::Printf(TEXT("网络连接失败: %s"), *GrpcResult.GetMessageString());
-        UE_LOG(LogTemp, Error, TEXT("[AvatarStreaming] %s"), *ErrString);
-
-        OnStreamError.Broadcast(ErrString);
-        OnStreamComplete.Broadcast();
+        Pending.bIsError = true;
+        Pending.ErrorMessage = FString::Printf(TEXT("网络连接失败: %s"), *GrpcResult.GetMessageString());
+        PendingResponseQueue.Enqueue(MoveTemp(Pending));
         return;
     }
 
-    // 云端模型抛出异常
     if (!Response.Success)
     {
-        FString ErrString = FString::Printf(TEXT("AI 引擎异常: %s"), *Response.ErrorMsg);
-        UE_LOG(LogTemp, Error, TEXT("[AvatarStreaming] %s"), *ErrString);
-
-        OnStreamError.Broadcast(ErrString);
-        OnStreamComplete.Broadcast();
+        Pending.bIsError = true;
+        Pending.ErrorMessage = FString::Printf(TEXT("AI 引擎异常: %s"), *Response.ErrorMsg);
+        PendingResponseQueue.Enqueue(MoveTemp(Pending));
         return;
     }
 
-    // ====================================================================
-    // 端侧硬熔断机制 (Circuit Breaker)
-    // 防止云端高频发包引发 UE5 端侧物理内存耗尽 (OOM)
-    // ====================================================================
-    if (QueuedChunkCounter.GetValue() > MaxQueueChunks)
+    if (Response.AudioPcm.Value.Num() > 0)
     {
-        UE_LOG(LogTemp, Error, TEXT("[AvatarStreaming] 熔断触发：端侧缓冲池积压超出阈值。强制截断当前流！"));
-        InterruptAndFlush();
-        return;
-    }
-
-    // ====================================================================
-    // 音频与面部数据分发
-    // ====================================================================
-    if (Response.AudioPcm.Value.Num() > 0 && SynthPlayer)
-    {
-        // 音频数据直接投递给现代合成器，底层音频线程将自动消费
-        SynthPlayer->QueueAudio(Response.AudioPcm.Value);
-        QueuedChunkCounter.Increment(); // 记录背压水位
+        Pending.AudioPcm = Response.AudioPcm.Value;
     }
 
     if (Response.Frames.Num() > 0)
     {
         for (const FGrpcAvatarBlendShapeFrame& Frame : Response.Frames)
         {
-            BlendShapeQueue.Enqueue(Frame.Weights);
+            Pending.BlendShapeFrames.Add(Frame.Weights);
         }
     }
 
-    // 检测网络流结束标志 (EOF)
-    if (Response.IsEndOfStream)
+    Pending.bIsEndOfStream = Response.IsEndOfStream;
+    PendingResponseQueue.Enqueue(MoveTemp(Pending));
+}
+
+void UAvatarStreamingComponent::ProcessPendingResponses()
+{
+    FPendingResponse Pending;
+    while (PendingResponseQueue.Dequeue(Pending))
     {
-        UE_LOG(LogTemp, Log, TEXT("[AvatarStreaming] 接收到网络流 EOF 标志，等待本地动画序列执行完毕..."));
-        bIsNetworkStreamEnded = true;
+        if (Pending.bIsError)
+        {
+            UE_LOG(LogTemp, Error, TEXT("[AvatarStreaming] %s"), *Pending.ErrorMessage);
+            OnStreamError.Broadcast(Pending.ErrorMessage);
+            OnStreamComplete.Broadcast();
+            return;
+        }
+
+        if (QueuedChunkCounter.GetValue() > MaxQueueChunks)
+        {
+            UE_LOG(LogTemp, Error, TEXT("[AvatarStreaming] 熔断触发：端侧缓冲池积压超出阈值。强制截断当前流！"));
+            InterruptAndFlush();
+            return;
+        }
+
+        if (Pending.AudioPcm.Num() > 0 && SynthPlayer)
+        {
+            SynthPlayer->QueueAudio(Pending.AudioPcm);
+            QueuedChunkCounter.Increment();
+        }
+
+        for (const TArray<float>& FrameData : Pending.BlendShapeFrames)
+        {
+            BlendShapeQueue.Enqueue(FrameData);
+        }
+
+        if (Pending.bIsEndOfStream)
+        {
+            UE_LOG(LogTemp, Log, TEXT("[AvatarStreaming] 接收到网络流 EOF 标志，等待本地动画序列执行完毕..."));
+            bIsNetworkStreamEnded = true;
+        }
     }
 }
 
 void UAvatarStreamingComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+    ProcessPendingResponses();
 
     // ====================================================================
     // 1. 面部渲染数据流消费 (Animation Frame Buffer Update)
@@ -249,9 +270,8 @@ void UAvatarStreamingComponent::TickComponent(float DeltaTime, ELevelTick TickTy
     // ====================================================================
     // 2. 面部动画帧序列插值渲染
     // ====================================================================
-    if (FrameBuffer.Num() > 0)
+    if (FrameBuffer.Num() > FrameBufferOffset)
     {
-        // 向底层合成器索要绝对物理时间
         if (SynthPlayer)
         {
             CurrentAudioTime = SynthPlayer->GetCurrentAudioTime();
@@ -260,27 +280,32 @@ void UAvatarStreamingComponent::TickComponent(float DeltaTime, ELevelTick TickTy
         float ExactFrame = CurrentAudioTime * AnimationFPS;
         int32 FrameIndex0 = FMath::FloorToInt(ExactFrame);
 
-        // 历史帧垃圾回收 (Garbage Collection)：截断过期帧防内存泄漏
         if (FrameIndex0 > 150)
         {
-            FrameBuffer.RemoveAt(0, FrameIndex0);
-            CurrentAudioTime -= (static_cast<float>(FrameIndex0) / AnimationFPS);
+            int32 RemoveCount = FMath::Min(FrameIndex0, FrameBuffer.Num() - FrameBufferOffset);
+            FrameBufferOffset += RemoveCount;
+            CurrentAudioTime -= (static_cast<float>(RemoveCount) / AnimationFPS);
             ExactFrame = CurrentAudioTime * AnimationFPS;
             FrameIndex0 = FMath::FloorToInt(ExactFrame);
+
+            if (FrameBufferOffset > 500)
+            {
+                FrameBuffer.RemoveAt(0, FrameBufferOffset);
+                FrameBufferOffset = 0;
+            }
         }
 
-        int32 FrameIndex1 = FrameIndex0 + 1;
-        float Alpha = ExactFrame - FrameIndex0; // 计算帧间插值权重 [0.0, 1.0)
+        int32 ActualIndex0 = FrameBufferOffset + FrameIndex0;
+        int32 ActualIndex1 = ActualIndex0 + 1;
+        float Alpha = ExactFrame - FrameIndex0;
 
-        // 越界防护与插值平滑处理
-        if (FrameIndex0 < FrameBuffer.Num())
+        if (ActualIndex0 < FrameBuffer.Num())
         {
-            const TArray<float>& Shapes0 = FrameBuffer[FrameIndex0];
+            const TArray<float>& Shapes0 = FrameBuffer[ActualIndex0];
 
-            if (FrameIndex1 < FrameBuffer.Num())
+            if (ActualIndex1 < FrameBuffer.Num())
             {
-                // 执行帧间线性插值，将云端 30FPS 平滑补偿至 UE5 本地高渲染帧率
-                const TArray<float>& Shapes1 = FrameBuffer[FrameIndex1];
+                const TArray<float>& Shapes1 = FrameBuffer[ActualIndex1];
                 for (int32 i = 0; i < 52; ++i)
                 {
                     CurrentBlendShapes[i] = FMath::Lerp(Shapes0[i], Shapes1[i], Alpha);
@@ -288,17 +313,14 @@ void UAvatarStreamingComponent::TickComponent(float DeltaTime, ELevelTick TickTy
             }
             else
             {
-                // 抵达当前缓冲末尾，保持静态
                 CurrentBlendShapes = Shapes0;
             }
         }
     }
     else
     {
-        // ====================================================================
-        // 网络饥饿或播放结束状态：执行面部权重平滑衰减
-        // ====================================================================
         CurrentAudioTime = 0.0f;
+        FrameBufferOffset = 0;
         for (int32 i = 0; i < 52; ++i)
         {
             CurrentBlendShapes[i] = FMath::FInterpTo(CurrentBlendShapes[i], 0.0f, DeltaTime, 15.0f);
@@ -309,7 +331,7 @@ void UAvatarStreamingComponent::TickComponent(float DeltaTime, ELevelTick TickTy
     // 3. 终极状态机检测：流生命周期闭环与 UI 恢复广播
     // ====================================================================
     // 触发条件：网络宣告下发完毕 && 本地面部动画缓冲已被完全消费
-    if (bIsNetworkStreamEnded && FrameBuffer.IsEmpty())
+    if (bIsNetworkStreamEnded && FrameBuffer.Num() <= FrameBufferOffset)
     {
         UE_LOG(LogTemp, Log, TEXT("[AvatarStreaming] 对话生命周期完整闭环！执行 UI 恢复广播。"));
 

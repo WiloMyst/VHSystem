@@ -29,11 +29,12 @@ void AvatarSession::HandleEvent(EventType type, bool ok) {
 
     // 2. 异常或 EOF 处理：客户端主动断开或完成发送
     if (!ok) {
-        spdlog::info("[AvatarSession] 收到客户端 EOF 或连接断开，发起优雅关闭 (Graceful Shutdown)。");
-        // 更新会话存活状态，阻断后续异步回调触发网络 I/O
         is_active_.store(false);
-        auto* tag = new EventTag{shared_from_this(), EventType::FINISH};
-        stream_.Finish(grpc::Status::OK, tag);
+        if (!is_finishing_.exchange(true)) {
+            spdlog::info("[AvatarSession] 收到客户端 EOF 或连接断开，发起优雅关闭 (Graceful Shutdown)。");
+            auto* tag = new EventTag{shared_from_this(), EventType::FINISH};
+            stream_.Finish(grpc::Status::OK, tag);
+        }
         return;
     }
 
@@ -55,28 +56,24 @@ void AvatarSession::HandleEvent(EventType type, bool ok) {
             break;
         }
         case EventType::WRITE: {
+            Avatar::AvatarStreamResponse next_response;
             bool has_more = false;
             
-            // 极小化临界区：仅保护队列弹栈与状态机转移
             {
                 std::lock_guard<std::mutex> lock(write_mtx_);
-                write_queue_.pop(); // 移除已确认发送成功的数据包
+                write_queue_.pop();
                 
                 if (!write_queue_.empty()) {
-                    has_more = true; // 队列中存在积压数据，维持写入状态
+                    has_more = true;
+                    next_response = write_queue_.front();
                 } else {
-                    is_writing_ = false; // 队列清空，重置状态机
+                    is_writing_ = false;
                 }
-            } // 锁释放
-            
-            // 锁外执行网络 I/O，严防底层系统调用阻塞临界区
-            if (has_more) {
-                IssueWrite(write_queue_.front());
             }
-            break;
-        }
-        case EventType::FINISH: {
-            spdlog::info("[AvatarSession] 会话正常终止。");
+            
+            if (has_more) {
+                IssueWrite(next_response);
+            }
             break;
         }
     }
@@ -98,19 +95,23 @@ void AvatarSession::IssueWrite(const Avatar::AvatarStreamResponse& response) {
 }
 
 void AvatarSession::EnqueueWrite(const Avatar::AvatarStreamResponse& response) {
+    if (is_finishing_.load()) {
+        spdlog::debug("[AvatarSession] 流已关闭，丢弃待写入响应。");
+        return;
+    }
+
     bool should_start_write = false;
     
-    // 极小化临界区：仅负责数据入队与状态判定
     {
         std::lock_guard<std::mutex> lock(write_mtx_);
+        if (is_finishing_.load()) return;
         write_queue_.push(response);
         if (!is_writing_) {
             is_writing_ = true;
-            should_start_write = true; // 获取首发写令牌
+            should_start_write = true;
         }
-    } // 锁释放
+    }
     
-    // 锁外触发异步写入，严格遵守 gRPC AsyncReaderWriter 的串行 Write 契约
     if (should_start_write) {
         IssueWrite(write_queue_.front());
     }
@@ -124,7 +125,13 @@ void AvatarSession::ProcessRequestAsync(Avatar::AvatarStreamRequest req) {
     spdlog::info("[AvatarSession] 接收到文本推理请求 [请求ID: {}]: {}", my_request_id, raw_text);
     
     if (raw_text.empty()) {
-        throw std::invalid_argument("Received empty text payload from client.");
+        spdlog::warn("[AvatarSession] 收到空文本载荷，返回错误响应。");
+        Avatar::AvatarStreamResponse err_reply;
+        err_reply.set_success(false);
+        err_reply.set_error_msg("Empty text payload received.");
+        err_reply.set_is_end_of_stream(true);
+        EnqueueWrite(err_reply);
+        return;
     }
 
     // 将推理任务投递至防击穿线程池
@@ -138,7 +145,7 @@ void AvatarSession::ProcessRequestAsync(Avatar::AvatarStreamRequest req) {
                 /* 回调 1: On Chunk Ready (数据就绪) */
                 [this, self, my_request_id](const ChunkResult& chunk) {
                     // 安全拦截：检验当前会话存活状态与请求世代号，防止悬垂回调操作僵尸指针
-                    if (!self->is_active_.load() || self->current_request_id_.load() != my_request_id) {
+                    if (!self->is_active_.load() || self->is_finishing_.load() || self->current_request_id_.load() != my_request_id) {
                         spdlog::warn("[AvatarSession] 拦截到废弃回调：会话已终止或请求已过期，直接丢弃该数据切片。");
                         return; 
                     }
@@ -164,7 +171,7 @@ void AvatarSession::ProcessRequestAsync(Avatar::AvatarStreamRequest req) {
                     reply.set_is_end_of_stream(chunk.is_last_chunk);
                     
                     // 二次存活确认后，推入发送队列
-                    if (self->is_active_.load()) {
+                    if (self->is_active_.load() && !self->is_finishing_.load()) {
                         self->EnqueueWrite(reply);
                     }
                 },
@@ -177,11 +184,13 @@ void AvatarSession::ProcessRequestAsync(Avatar::AvatarStreamRequest req) {
 
         } catch (const std::exception& e) {
             spdlog::error("[AvatarSession] 推理管线发生异常: {}", e.what());
-            Avatar::AvatarStreamResponse reply;
-            reply.set_success(false);
-            reply.set_error_msg(std::string("Internal Pipeline Error: ") + e.what());
-            reply.set_is_end_of_stream(true);
-            self->EnqueueWrite(reply);
+            if (!self->is_finishing_.load()) {
+                Avatar::AvatarStreamResponse reply;
+                reply.set_success(false);
+                reply.set_error_msg(std::string("Internal Pipeline Error: ") + e.what());
+                reply.set_is_end_of_stream(true);
+                self->EnqueueWrite(reply);
+            }
         }
     });
 

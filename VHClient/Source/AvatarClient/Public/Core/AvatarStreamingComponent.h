@@ -1,4 +1,4 @@
-﻿// Copyright 2025 WiloMyst. All Rights Reserved.
+// Copyright 2025 WiloMyst. All Rights Reserved.
 
 #pragma once
 
@@ -84,51 +84,61 @@ private:
 
 	FGrpcContextHandle CurrentSessionHandle;
 
-	// 标记网络流是否结束
+	FString SessionId;
+
 	bool bIsNetworkStreamEnded = false;
 
 	// ====================================================================
 	// 5. 客户端背压防护机制 (Backpressure & Circuit Breaker)
 	// ====================================================================
 
-	// 维护缓冲队列的原子计数器，提供线程安全的积压量统计
 	FThreadSafeCounter QueuedChunkCounter;
 
-	// 客户端硬熔断水位线阈值（设定为 50，折合音频物理缓冲约 5-10 秒，超出则触发强制截断防 OOM）
 	int32 MaxQueueChunks = 50;
 
 	// ====================================================================
 	// 6. 抗抖动无锁缓冲区 (Jitter Buffer)
 	// ====================================================================
 
-	// 存放网络下发的面部表情 52 维权重数据分片
 	TQueue<TArray<float>> BlendShapeQueue;
 
 	// ====================================================================
 	// 7. 音视频同步与播放驱动组件 (Audio-Visual Sync & Playback)
 	// ====================================================================
 
-	// 挂载于宿主 Actor 的现代音频合成组件
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Avatar|Audio", meta = (AllowPrivateAccess = "true"))
 	UAvatarSynthComponent* SynthPlayer;
 
-	// 面部表情连续时间轴缓存队列
 	TArray<TArray<float>> FrameBuffer;
 
-	// 基于音频实际播放时间的绝对时钟 (单位：秒)
+	int32 FrameBufferOffset = 0;
+
 	float CurrentAudioTime;
 
-	// 云端 AI 模型的面部表情生成帧率基准 (当前约定为 30.0 FPS)
 	float AnimationFPS;
 
-	// 当前渲染帧待应用的 ARKit 52 维混合形状权重
 	UPROPERTY(Transient)
 	TArray<float> CurrentBlendShapes;
 
-	// 目标面部网格体引用缓存
 	UPROPERTY(Transient)
 	USkeletalMeshComponent* TargetFaceMesh;
 
-	// ARKit 52 维标准面部肌肉命名规范契约字典
 	static const FName ARKitBlendShapeNames[52];
+
+	// ====================================================================
+	// 8. 线程安全响应缓冲 (Thread-Safe Response Buffer)
+	// ====================================================================
+
+	struct FPendingResponse
+	{
+		TArray<uint8> AudioPcm;
+		TArray<TArray<float>> BlendShapeFrames;
+		bool bIsEndOfStream = false;
+		bool bIsError = false;
+		FString ErrorMessage;
+	};
+
+	TQueue<FPendingResponse> PendingResponseQueue;
+
+	void ProcessPendingResponses();
 };
