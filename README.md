@@ -1,5 +1,7 @@
 # VHSystem - 虚拟人对话前后端
 
+[![license](https://img.shields.io/badge/license-MIT-blue)](https://github.com/WiloMyst/OpenWorldARPG/blob/master/LICENSE) [![GitHub repo size](https://img.shields.io/github/repo-size/WiloMyst/VHSystem)](https://github.com/WiloMyst/VHSystem)
+
 一个基于 C++ 的流式对话前后端：接收文本输入，流式调用云端大模型生成回复，再经 TTS 合成音频、Audio2Face 生成面部表情数据，通过 gRPC 双向流下发给 UE5 客户端播放并驱动数字人。项目重心在后端的流式推理管线与并发控制，客户端只作为展示端。
 
 ## 演示
