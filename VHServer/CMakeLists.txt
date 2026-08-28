@@ -1,47 +1,34 @@
 cmake_minimum_required(VERSION 3.15)
 project(VHServer CXX)
 
-# =====================================================================
-# 1. 全局配置 (Global Settings)
-# =====================================================================
+# 1. 全局配置
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# =====================================================================
-# 2. 依赖查找与环境声明 (Dependencies)
-# =====================================================================
-# 动态寻找 protoc 和插件路径
+# 2. 依赖查找
 find_program(PROTOC_EXECUTABLE NAMES protoc)
 find_program(GRPC_CPP_PLUGIN_EXECUTABLE NAMES grpc_cpp_plugin)
 
 if(NOT PROTOC_EXECUTABLE OR NOT GRPC_CPP_PLUGIN_EXECUTABLE)
-    message(FATAL_ERROR "编译环境不完整：未找到 protoc 或 grpc_cpp_plugin！")
+    message(FATAL_ERROR "protoc or grpc_cpp_plugin not found")
 endif()
 
-# 2.1 现代 C++ 库 (使用 find_package)
 find_package(spdlog REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(nlohmann_json REQUIRED)
+find_package(CURL REQUIRED)
 
-# 2.2 底层网络库 (强制使用 pkg-config 抓取 Linux 原生库，防污染)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GRPC REQUIRED grpc++)
 pkg_check_modules(PROTOBUF REQUIRED protobuf)
 
-# 2.3 第三方预编译库 (ONNX Runtime)
 set(ONNXRUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
 
-# =====================================================================
-# 3. 协议编译 (Protobuf & gRPC Code Generation)
-# =====================================================================
+# 3. Protobuf 代码生成
 set(PROTO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/protos")
 set(PROTO_FILE "${PROTO_DIR}/avatarStream.proto")
 set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY ${GENERATED_DIR})
-
-# # 锁死 Linux 原生编译器路径
-# set(PROTOC_EXECUTABLE "/usr/bin/protoc")
-# set(GRPC_CPP_PLUGIN_EXECUTABLE "/usr/bin/grpc_cpp_plugin")
 
 add_custom_command(
     OUTPUT "${GENERATED_DIR}/avatarStream.pb.cc"
@@ -57,40 +44,33 @@ add_custom_command(
     DEPENDS "${PROTO_FILE}"
 )
 
-# =====================================================================
-# 4. 构建目标 (Target Definition)
-# =====================================================================
-add_executable(vh_server 
-    src/main.cpp 
-    src/core/grpc_server.cpp 
-    src/core/avatar_session.cpp 
-    src/business/ai_brain.cpp 
-    src/business/models/piper_tts_model.cpp 
+# 4. 构建目标
+add_executable(vh_server
+    src/main.cpp
+    src/core/grpc_server.cpp
+    src/core/avatar_session.cpp
+    src/business/ai_brain.cpp
+    src/business/models/onnx_model_base.cpp
+    src/business/models/piper_tts_model.cpp
     src/business/models/audio2face_model.cpp
-    src/business/models/qwen_llama_engine.cpp
-    "${GENERATED_DIR}/avatarStream.pb.cc" 
+    src/business/models/cloud_llm_engine.cpp
+    "${GENERATED_DIR}/avatarStream.pb.cc"
     "${GENERATED_DIR}/avatarStream.grpc.pb.cc"
 )
 
-# =====================================================================
-# 5. 目标属性配置 (Modern CMake Target-Centric Config)
-# =====================================================================
-# 5.1 引入头文件目录 (PRIVATE 表示这些头文件仅供 vh_server 内部使用)
+# 5. 头文件与链接配置
 target_include_directories(vh_server PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/include" 
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp" 
-    "${GENERATED_DIR}" 
-    ${GRPC_INCLUDE_DIRS} 
-    ${PROTOBUF_INCLUDE_DIRS} 
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${GENERATED_DIR}"
+    ${GRPC_INCLUDE_DIRS}
+    ${PROTOBUF_INCLUDE_DIRS}
     "${ONNXRUNTIME_DIR}/include"
 )
 
-# 5.2 引入动态库搜索目录
-target_link_directories(vh_server PRIVATE 
+target_link_directories(vh_server PRIVATE
     "${ONNXRUNTIME_DIR}/lib"
 )
 
-# 5.3 统一链接所有底层系统库与业务库
 target_link_libraries(vh_server PRIVATE
     ${GRPC_LIBRARIES}
     ${PROTOBUF_LIBRARIES}
@@ -98,7 +78,6 @@ target_link_libraries(vh_server PRIVATE
     yaml-cpp
     onnxruntime
     nlohmann_json::nlohmann_json
+    CURL::libcurl
     pthread
-    llama 
-    ggml
 )

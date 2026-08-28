@@ -3,6 +3,7 @@
 #include <memory>
 #include <atomic>
 #include <csignal>
+#include "engine/infra/config_manager.hpp"
 
 namespace engine {
     namespace infra { class ThreadPool; }
@@ -17,17 +18,15 @@ public:
     GrpcServer();
     ~GrpcServer();
 
-    void Run(const std::string& host, int port, int threads, int max_queue, 
-             const std::string& llm_model_path, 
-             const std::string& tts_model_path, 
-             const std::string& v2f_model_path);
+    void Run(const std::string& host, int port, int threads, int max_queue,
+             const infra::AppConfig& config);
 
     void Shutdown();
 
 private:
     void HandleRpcs();
 
-    struct Impl; 
+    struct Impl;
     std::unique_ptr<Impl> pimpl_;
 
     std::unique_ptr<infra::ThreadPool> pool_;

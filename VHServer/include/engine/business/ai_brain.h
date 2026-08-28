@@ -6,18 +6,16 @@
 #include <functional>
 #include <mutex>
 #include <cstdint>
+#include <atomic>
+#include "engine/infra/config_manager.hpp"
 
-// ========================================================================
-// 前置声明 (Forward Declarations)
-// 作用：隐藏底层复杂对象的物理布局，隔离依赖，加速大型工程编译。
-// ========================================================================
 namespace engine {
 namespace infra {
-    class ThreadPool; 
+    class ThreadPool;
 }
 namespace business {
 namespace models {
-    class QwenLlamaEngine;
+    class CloudLLMEngine;
     class PiperTTSModel;
     class Audio2FaceModel;
 }
@@ -27,75 +25,69 @@ namespace models {
 namespace engine {
 namespace business {
 
-/**
- * @brief 异构计算输出载荷 (Data Payload)
- * @details 封装音视频多模态同步帧，作为 gRPC 最终网络下发的最小数据传输单元 (Chunk)。
- */
+/// 单次推理产出的流式数据块
 struct ChunkResult {
-    // 16-bit PCM 单声道音频流原始数据 (定长切片)
-    std::vector<int16_t> audio_pcm_chunk;
-    
-    // ARKit 52 维面部骨骼权重二维矩阵 [Frame][52_Weights]
-    std::vector<std::vector<float>> blendshape_frames_chunk;
-    
-    // 流结束标志符 (EOF)。当且仅当大模型生成完毕且最后一帧音频被处理时为 true
-    bool is_last_chunk = false; 
+    std::vector<int16_t> audio_pcm_chunk;              // PCM 音频片段 (16-bit, mono)
+    std::vector<std::vector<float>> blendshape_frames_chunk; // ARKit 52维表情帧
+    bool is_last_chunk = false;
 };
 
-/**
- * @brief 虚拟人 AI 大脑中枢控制器
- * @details 基于事件驱动与多级异步缓冲队列的异构调度总线，保证极低延迟的音画同步表现。
- */
+/// 运行时性能指标, 供监控使用
+struct RuntimeMetrics {
+    std::atomic<uint64_t> total_requests{0};       // 累计请求数
+    std::atomic<uint64_t> dropped_requests{0};      // 背压丢弃请求数
+    std::atomic<uint64_t> total_chunks{0};          // 累计输出数据块数
+    std::atomic<uint64_t> active_sessions{0};       // 当前活跃会话数
+    std::atomic<double>   last_llm_ms{0.0};         // 最近一次 LLM 推理耗时
+    std::atomic<double>   last_tts_ms{0.0};         // 最近一次 TTS 推理耗时
+    std::atomic<double>   last_v2f_ms{0.0};         // 最近一次 V2F 推理耗时
+};
+
 class AIBrain {
 public:
-    /**
-     * @brief 挂载算力模型并初始化异步调度总线
-     * @param llm_path Qwen2.5 (GGUF) 大语言模型物理路径
-     * @param tts_path Piper TTS 语音合成模型物理路径
-     * @param v2f_path Audio2Face 面部基向量映射模型物理路径
-     */
-    explicit AIBrain(const std::string& llm_path, const std::string& tts_path, const std::string& v2f_path);
-    
+    explicit AIBrain(const infra::AppConfig& config);
     ~AIBrain();
 
-    // 禁用拷贝与赋值操作，确保核心调度器的全局唯一性与物理安全
     AIBrain(const AIBrain&) = delete;
     AIBrain& operator=(const AIBrain&) = delete;
 
-    /**
-     * @brief 触发核心流式推理管线 (LLM -> NLP -> TTS -> V2F)
-     * @param user_prompt 用户的原始提问文本
-     * @param on_chunk_ready 异步回调钩子：当一个多模态数据切片就绪时触发（推给 gRPC）
-     * @param is_cancelled 中断探针回调：用于感知客户端连接断开，触发服务端算力资源的提前释放
-     */
-    void InferStream(const std::string& user_prompt, 
+    /// 流式推理入口: 用户文本 -> LLM 生成 -> TTS 合成 -> V2F 面部动画
+    /// @param user_prompt 用户输入文本
+    /// @param on_chunk_ready 每个数据块就绪时的回调
+    /// @param is_cancelled 取消检查回调, 返回 true 时中止管线
+    void InferStream(const std::string& user_prompt,
                      std::function<void(const ChunkResult&)> on_chunk_ready,
                      std::function<bool()> is_cancelled = nullptr);
 
+    /// 获取运行时指标 (供监控 RPC 使用)
+    RuntimeMetrics& GetMetrics() { return metrics_; }
+
 private:
-    // ====================================================================
-    // 模型层 (Model Layer): 生命周期交由 std::unique_ptr 托管
-    // ====================================================================
-    std::unique_ptr<models::QwenLlamaEngine> qwen_engine_;
+    // 推理引擎
+    std::unique_ptr<models::CloudLLMEngine>  llm_engine_;
     std::unique_ptr<models::PiperTTSModel>   tts_model_;
     std::unique_ptr<models::Audio2FaceModel> v2f_model_;
 
-    // ====================================================================
-    // 调度层 (Scheduling Layer): 异构流水线线程池
-    // ====================================================================
-    std::unique_ptr<infra::ThreadPool> llm_pipeline_; // 专职负责大语言模型自回归生成的独立线程
-    std::unique_ptr<infra::ThreadPool> tts_pipeline_; // 专职负责 CPU 声学合成的串行队列
-    std::unique_ptr<infra::ThreadPool> v2f_pipeline_; // 专职保护 GPU/CUDA 调用的独占型队列
+    // 三级流水线线程池: LLM -> TTS -> V2F 各自独立线程
+    std::unique_ptr<infra::ThreadPool> llm_pipeline_;
+    std::unique_ptr<infra::ThreadPool> tts_pipeline_;
+    std::unique_ptr<infra::ThreadPool> v2f_pipeline_;
 
-    // ====================================================================
-    // 网络层 (Network Layer): 跨进程 NLP 微服务通信基建
-    // ====================================================================
+    // NLP 微服务连接 (文本 -> 音素 ID)
     int nlp_socket_ = -1;
     std::mutex nlp_mutex_;
-    static constexpr int NLP_MAX_RETRIES = 3;
-    static constexpr int NLP_RECV_TIMEOUT_SEC = 15;
-    static constexpr int NLP_SEND_TIMEOUT_SEC = 10;
-    
+    std::string nlp_host_;
+    int nlp_port_ = 50052;
+    int nlp_max_retries_ = 3;
+    int nlp_recv_timeout_sec_ = 15;
+    int nlp_send_timeout_sec_ = 10;
+
+    // 流式参数
+    int sub_chunk_samples_ = 8820;
+
+    // 运行时指标
+    RuntimeMetrics metrics_;
+
     void InitNlpConnection();
     void CloseNlpConnection();
     bool EnsureNlpConnection();

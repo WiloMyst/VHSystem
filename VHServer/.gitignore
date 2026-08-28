@@ -25,5 +25,7 @@ generated/
 *.onnx.data
 *.pt
 *.bin
+*.gguf
 *.wav
 third_party/*
+tools/*

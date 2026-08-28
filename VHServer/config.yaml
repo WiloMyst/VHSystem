@@ -1,13 +1,35 @@
 server:
   host: "0.0.0.0"
   port: 50051
-  worker_threads: 4    # 业务线程池数量
+  worker_threads: 4
+  max_queue_size: 1000
 
 ai_brain:
-  llm_model_path: "../models/qwen2.5-1.5b-chat-q4_k_m.gguf"
+  llm_api_base_url: "https://api.deepseek.com"
+  llm_api_key: "sk-xxxx"
+  llm_model_name: "deepseek-chat"
   tts_model_path: "../models/zh_CN-huayan-medium.onnx"
-  v2f_model_path: "../models/dummy_v2f.onnx"
-  intra_op_threads: 1  # ONNX算子内部线程数
+  v2f_model_path: "../models/v2f_audio2face.onnx"
+  intra_op_threads: 1
+  v2f_use_gpu: false
+  max_generation_tokens: 1024
+  llm_temperature: 0.7
+  system_prompt: "你是一个专业的AI助手，请用简洁自然的语气回答用户的问题。"
+
+nlp:
+  host: "127.0.0.1"
+  port: 50052
+  max_retries: 3
+  recv_timeout_sec: 15
+  send_timeout_sec: 10
+
+streaming:
+  audio_sample_rate: 22050
+  animation_fps: 30
+  sub_chunk_samples: 8820
 
 logging:
-  level: "info"        # 可选: debug, info, warn, error
+  level: "info"
+  file_path: "logs/vh_server.log"
+  max_file_size_mb: 10
+  max_files: 3
